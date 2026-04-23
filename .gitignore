@@ -96,8 +96,8 @@ build_iwyu/
 staging/
 out/
 
-# evenmu runtime
-config/
+# evemu runtime
+/config/
 
 # doxygen output
 doxygen/
