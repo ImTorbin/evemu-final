@@ -54,8 +54,8 @@ COPY --from=app-build /app/ /app
 # Add SQL loading tools
 ADD /sql/ /src/sql
 
-# Run SQL tool script
-RUN cd /src/sql && ./get_evedbtool.sh
+# Run SQL tool script via shell (avoids execute-bit dependency)
+RUN cd /src/sql && sh ./get_evedbtool.sh
 
 # Expose server ports
 EXPOSE 26000
@@ -63,6 +63,7 @@ EXPOSE 26001
 
 # Change ownership of the application to evemu
 RUN useradd evemu
+RUN chmod +x /src/utils/container-scripts/*.sh
 RUN chown -R evemu:evemu /app
 RUN chown -R evemu:evemu /src
 

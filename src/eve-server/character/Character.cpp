@@ -556,11 +556,13 @@ void Character::ClearSkillFlags()
         cur->SetFlag(flagSkill, false);
 }
 
-uint8 Character::GetSPPerMin(Skill* skill)
+uint16 Character::GetSPPerMin(Skill* skill)
 {
     uint8 primary = GetAttribute(skill->GetAttribute(AttrPrimaryAttribute).get_uint32()).get_uint32();
     uint8 secondary = GetAttribute(skill->GetAttribute(AttrSecondaryAttribute).get_uint32()).get_uint32();
-    return EvEMath::Skill::PointsPerMinute(primary, secondary);
+    // Permanent accelerated progression: train all skills at 10x normal speed.
+    static constexpr uint16 kSkillTrainingMultiplier = 10;
+    return EvEMath::Skill::PointsPerMinute(primary, secondary) * kSkillTrainingMultiplier;
 }
 
 SkillRef Character::GetCharSkillRef(uint16 skillTypeID) const
