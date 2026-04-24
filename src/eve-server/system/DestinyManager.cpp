@@ -442,6 +442,12 @@ void DestinyManager::UpdateVelocity(bool isMoving) {
         m_targBubble = nullptr;
         m_maxSpeed = m_speedToLeaveWarp;
         m_prevSpeed = m_speedToLeaveWarp;
+        // Subwarp exit must match the warp trajectory. Tunnel motion used
+        // warp_vector * speed while this path used m_shipHeading; after login
+        // snap / gate-adjacent bubbles / align quirks heading could diverge or
+        // be near-zero, yielding wrong CmdGotoDirection + velocity (clients saw
+        // huge drift in a random axis).
+        m_shipHeading = m_warpState->warp_vector;
         m_velocity = m_shipHeading * m_maxSpeed;
         m_prevSpeedFraction = m_maxSpeed / m_maxShipSpeed;
         m_shipAccelTime = m_shipAgility * -log(1-(m_prevSpeedFraction));
@@ -2164,6 +2170,23 @@ void DestinyManager::WarpTo(const GPoint& where, int32 distance/*0*/, bool autoP
      */
     SafeDelete(m_warpState);
 
+    // Never warp to (0,0,0) / NaN — e.g. login waypoint cleared by SetLoginWarpComplete()
+    // before the LoginWarp timer runs again. That yields a huge line through the system and
+    // can crash the client warp effect (GetWarpCollisions: NoneType.radius).
+    if (where.isZero() || where.isNaN() || where.isInf()) {
+        _log(DESTINY__ERROR, "Destiny::WarpTo() - %s(%u): rejecting invalid destination (zero=%s nan=%s inf=%s).",
+            mySE->GetName(), mySE->GetID(),
+            where.isZero() ? "true" : "false",
+            where.isNaN() ? "true" : "false",
+            where.isInf() ? "true" : "false");
+        if (mySE->HasPilot()) {
+            mySE->GetPilot()->SendErrorMsg("Warp destination invalid. Relog if this persists.");
+            Stop();
+            mySE->GetPilot()->SetLoginWarpComplete();
+        }
+        return;
+    }
+
     // check for autopilot.  it has 'special' checks in client for auto-disable by destiny update
     if (autoPilot) {
         Follow(pSE, distance);
@@ -2670,7 +2693,7 @@ void DestinyManager::SetPosition(const GPoint &pt, bool update /*false*/) {
             // can diverge enough that two clients disagree on absolute ship positions.
             // Send a low-rate self-only correction snapshot to re-anchor the pilot.
             const uint32 nowMS = static_cast<uint32>(GetTimeMSeconds());
-            if ((nowMS - m_lastSelfSyncMS) >= 500) {
+            if ((nowMS - m_lastSelfSyncMS) >= 400) {
                 m_lastSelfSyncMS = nowMS;
 
                 SetBallPosition selfPos;

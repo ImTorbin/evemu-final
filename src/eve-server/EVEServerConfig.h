@@ -78,6 +78,8 @@ public:
         bool saveOnMove;
         bool saveOnUpdate;
         bool highSecCyno;
+        /** When true, sovereignty jammer IDs block cynos / jump bridges. Default false for private servers with incomplete SOV data. */
+        bool enforceSovJammer;
         bool shootRoids;
         bool shootWrecks;
         uint8 mailDelay;

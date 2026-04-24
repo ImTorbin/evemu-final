@@ -28,6 +28,7 @@
 #ifndef __MODULEFACTORY_H__
 #define __MODULEFACTORY_H__
 
+#include "tables/invTypes.h"
 #include "ship/modules/ActiveModule.h"
 #include "ship/modules/MiningLaser.h"
 #include "ship/modules/PassiveModule.h"
@@ -37,6 +38,7 @@
 #include "ship/modules/ModuleItem.h"
 #include "ship/modules/TurretModule.h"
 #include "ship/modules/CynoModule.h"
+#include "ship/modules/JumpPortalModule.h"
 
 static GenericModule* ModuleFactory(ModuleItemRef mRef, ShipItemRef sRef)
 {
@@ -152,8 +154,9 @@ static GenericModule* ModuleFactory(ModuleItemRef mRef, ShipItemRef sRef)
             // Gang Assist Modules:
             case EVEDB::invGroups::Gang_Coordinator:                        return (new ActiveModule(mRef, sRef));    // Active - external
             case EVEDB::invGroups::Siege_Module:                            return (new ActiveModule(mRef, sRef));    // Active - external
-            case EVEDB::invGroups::Jump_Portal_Generator:                   return (new ActiveModule(mRef, sRef));    // Active - external
+            case EVEDB::invGroups::Jump_Portal_Generator:                   return (new JumpPortalModule(mRef, sRef));
             case EVEDB::invGroups::Cynosural_Field_Generator:               return (new CynoModule(mRef, sRef));
+            case EVEDB::invGroups::Covert_Cynosural_Field_Generator:        return (new CynoModule(mRef, sRef, EVEDB::invTypes::CovertCynosuralFieldI, false, false));
             case EVEDB::invGroups::Clone_Vat_Bay:                           return (new PassiveModule(mRef, sRef));
 
             // Mining Modules:

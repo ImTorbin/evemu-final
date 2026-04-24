@@ -9,6 +9,7 @@
 #ifndef _EVE_SHIP_MODULES_CYNO_MODULE_H_
 #define _EVE_SHIP_MODULES_CYNO_MODULE_H_
 
+#include "tables/invTypes.h"
 #include "ship/modules/ActiveModule.h"
 #include "system/SystemEntity.h"
 #include "Client.h"
@@ -16,7 +17,11 @@
 class CynoModule: public ActiveModule
 {
 public:
-    CynoModule(ModuleItemRef mRef, ShipItemRef sRef);
+    /** Standard cyno uses defaults; covert cyno passes CovertCynosuralFieldI and relaxed rules. */
+    CynoModule(ModuleItemRef mRef, ShipItemRef sRef,
+               uint32 fieldTypeID = EVEDB::invTypes::CynosuralFieldI,
+               bool requiresFleet = true,
+               bool blockedBySovJammer = true);
     virtual ~CynoModule()                                 { /* do nothing here */ }
 
     virtual CynoModule*       GetCynoModule()             { return this; }
@@ -29,6 +34,11 @@ public:
 
     // this is a check for those active modules that need it (mining, weapons) and overridden as needed
     virtual bool CanActivate();
+
+protected:
+    uint32 m_fieldTypeID;
+    bool m_requiresFleet;
+    bool m_blockedBySovJammer;
 
 private:
     Client* pClient;

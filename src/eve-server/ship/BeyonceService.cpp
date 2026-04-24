@@ -27,6 +27,7 @@
 #include "eve-server.h"
 
 #include "Client.h"
+#include "EntityList.h"
 #include "StaticDataMgr.h"
 #include "cache/ObjCacheService.h"
 #include "fleet/FleetService.h"
@@ -43,6 +44,65 @@
 #include "system/SystemManager.h"
 #include "system/cosmicMgrs/AnomalyMgr.h"
 #include "system/cosmicMgrs/ManagerDB.h"
+#include "inventory/InventoryItem.h"
+#include "inventory/AttributeEnum.h"
+#include "ship/Ship.h"
+#include "tables/invTypes.h"
+
+namespace {
+
+bool ValidateBeaconForCapitalJump(InventoryItemRef beacon, uint32 solarSystemID, Client* client)
+{
+    if (beacon.get() == nullptr) {
+        client->SendNotifyMsg("Invalid beacon.");
+        return false;
+    }
+    if (solarSystemID != 0 && beacon->locationID() != solarSystemID) {
+        client->SendNotifyMsg("Beacon is not in the target system.");
+        return false;
+    }
+    const uint32 tid = beacon->typeID();
+    if (tid != EVEDB::invTypes::CynosuralFieldI && tid != EVEDB::invTypes::CovertCynosuralFieldI) {
+        client->SendNotifyMsg("Invalid beacon type.");
+        return false;
+    }
+    SystemManager* sys = sEntityList.FindOrBootSystem(beacon->locationID());
+    if (sys == nullptr || sys->GetSE(beacon->itemID()) == nullptr) {
+        client->SendNotifyMsg("That cynosural field is no longer active.");
+        return false;
+    }
+    return true;
+}
+
+bool ValidateBeaconForPortalJump(InventoryItemRef beacon, uint32 solarSystemID, bool requireCovert, Client* client)
+{
+    if (beacon.get() == nullptr) {
+        client->SendNotifyMsg("Invalid beacon.");
+        return false;
+    }
+    if (beacon->locationID() != solarSystemID) {
+        client->SendNotifyMsg("Beacon is not in the target system.");
+        return false;
+    }
+    const uint32 tid = beacon->typeID();
+    if (requireCovert) {
+        if (tid != EVEDB::invTypes::CovertCynosuralFieldI) {
+            client->SendNotifyMsg("This portal requires a covert cynosural field.");
+            return false;
+        }
+    } else if (tid != EVEDB::invTypes::CynosuralFieldI) {
+        client->SendNotifyMsg("This portal requires a standard cynosural field.");
+        return false;
+    }
+    SystemManager* sys = sEntityList.FindOrBootSystem(beacon->locationID());
+    if (sys == nullptr || sys->GetSE(beacon->itemID()) == nullptr) {
+        client->SendNotifyMsg("That cynosural field is no longer active.");
+        return false;
+    }
+    return true;
+}
+
+} // namespace
 
 BeyonceService::BeyonceService(EVEServiceManager& mgr)
 : BindableService("beyonce", mgr, eAccessLevel_SolarSystem2)
@@ -1038,14 +1098,128 @@ PyResult BeyonceBound::CmdJumpThroughFleet(PyCallArgs &call, PyInt* otherCharID,
     // sm.StartService('sessionMgr').PerformSessionChange('jump', bp.CmdJumpThroughFleet, otherCharID, otherShipID, beaconID, solarsystemID)
     _log(SHIP__WARNING, "BeyonceBound::Handle_CmdJumpThroughFleet");
     call.Dump(SHIP__WARNING);
-    return PyStatic.NewNone();
+
+    (void)otherCharID;
+
+    _log(AUTOPILOT__MESSAGE, "%s called fleet jump portal.", call.client->GetName());
+    if (call.client->IsSessionChange()) {
+        call.client->SendNotifyMsg("Session Change currently active.");
+        return PyStatic.NewNone();
+    }
+
+    DestinyManager* pDestiny = call.client->GetShipSE()->DestinyMgr();
+    if (pDestiny == nullptr) {
+        codelog(CLIENT__ERROR, "%s: Client has no destiny manager!", call.client->GetName());
+        return PyStatic.NewNone();
+    }
+    if (pDestiny->IsWarping()) {
+        call.client->SendNotifyMsg("You can't do this while warping");
+        return PyStatic.NewNone();
+    }
+    if (pDestiny->IsFrozen()) {
+        call.client->SendNotifyMsg("Your ship is frozen and cannot move");
+        return PyStatic.NewNone();
+    }
+    if (pDestiny->AbortIfLoginWarping(true))
+        return PyStatic.NewNone();
+
+    FleetBridgeEntry br;
+    if (!sFltSvc.GetActiveBridgeForShip(otherShipID->value(), br)) {
+        call.client->SendNotifyMsg("There is no active jump portal for that ship.");
+        return PyStatic.NewNone();
+    }
+    if (br.beaconItemID != (uint32)beaconID->value() || br.solarSystemID != (uint32)solarSystemID->value()) {
+        call.client->SendNotifyMsg("Jump portal routing does not match an active bridge.");
+        return PyStatic.NewNone();
+    }
+
+    InventoryItemRef bridgeItem = sItemFactory.GetItemRefFromID(otherShipID->value());
+    ShipItemRef bridgeShip = ShipItemRef::StaticCast(bridgeItem);
+    if (bridgeShip.get() == nullptr || !bridgeShip->HasPilot()) {
+        call.client->SendNotifyMsg("Bridge ship is not available.");
+        return PyStatic.NewNone();
+    }
+    Client* bridgePilot = bridgeShip->GetPilot();
+    if (bridgePilot == nullptr || bridgePilot->GetFleetID() != call.client->GetFleetID()) {
+        call.client->SendNotifyMsg("You must be in the same fleet as the bridging ship.");
+        return PyStatic.NewNone();
+    }
+
+    InventoryItemRef beacon = sItemFactory.GetItemRefFromID(beaconID->value());
+    if (!ValidateBeaconForPortalJump(beacon, solarSystemID->value(), br.covert, call.client))
+        return PyStatic.NewNone();
+
+    ShipItemRef ship = call.client->GetShip();
+    const double mass = ship->GetAttribute(AttrMass).get_double();
+    if (!sFltSvc.ConsumeJumpPortalMass(otherShipID->value(), mass)) {
+        call.client->SendNotifyMsg("Insufficient jump portal mass capacity.");
+        return PyStatic.NewNone();
+    }
+
+    call.client->CynoJump(beacon);
+    return this->GetOID();
 }
 
 PyResult BeyonceBound::CmdJumpThroughAlliance(PyCallArgs &call, PyInt* otherShipID, PyInt* beaconID, PyInt* solarSystemID) {
     //sm.StartService('sessionMgr').PerformSessionChange('jump', bp.CmdJumpThroughAlliance, otherShipID, beaconID, solarsystemID)
     _log(SHIP__WARNING, "BeyonceBound::Handle_CmdJumpThroughAlliance");
     call.Dump(SHIP__WARNING);
-    return PyStatic.NewNone();
+
+    _log(AUTOPILOT__MESSAGE, "%s called alliance jump portal.", call.client->GetName());
+    if (call.client->IsSessionChange()) {
+        call.client->SendNotifyMsg("Session Change currently active.");
+        return PyStatic.NewNone();
+    }
+
+    DestinyManager* pDestiny = call.client->GetShipSE()->DestinyMgr();
+    if (pDestiny == nullptr) {
+        codelog(CLIENT__ERROR, "%s: Client has no destiny manager!", call.client->GetName());
+        return PyStatic.NewNone();
+    }
+    if (pDestiny->IsWarping()) {
+        call.client->SendNotifyMsg("You can't do this while warping");
+        return PyStatic.NewNone();
+    }
+    if (pDestiny->AbortIfLoginWarping(true))
+        return PyStatic.NewNone();
+
+    FleetBridgeEntry br;
+    if (!sFltSvc.GetActiveBridgeForShip(otherShipID->value(), br)) {
+        call.client->SendNotifyMsg("There is no active jump portal for that ship.");
+        return PyStatic.NewNone();
+    }
+    if (br.beaconItemID != (uint32)beaconID->value() || br.solarSystemID != (uint32)solarSystemID->value()) {
+        call.client->SendNotifyMsg("Jump portal routing does not match an active bridge.");
+        return PyStatic.NewNone();
+    }
+
+    InventoryItemRef bridgeItem = sItemFactory.GetItemRefFromID(otherShipID->value());
+    ShipItemRef bridgeShip = ShipItemRef::StaticCast(bridgeItem);
+    if (bridgeShip.get() == nullptr || !bridgeShip->HasPilot()) {
+        call.client->SendNotifyMsg("Bridge ship is not available.");
+        return PyStatic.NewNone();
+    }
+    Client* bridgePilot = bridgeShip->GetPilot();
+    const int32 jumpAlly = call.client->GetChar()->allianceID();
+    const int32 bridgeAlly = bridgePilot->GetChar()->allianceID();
+    if (jumpAlly == 0 || bridgeAlly == 0 || jumpAlly != bridgeAlly) {
+        call.client->SendNotifyMsg("Alliance jump portals require the same alliance membership.");
+        return PyStatic.NewNone();
+    }
+
+    InventoryItemRef beacon = sItemFactory.GetItemRefFromID(beaconID->value());
+    if (!ValidateBeaconForPortalJump(beacon, solarSystemID->value(), br.covert, call.client))
+        return PyStatic.NewNone();
+
+    ShipItemRef ship = call.client->GetShip();
+    const double mass = ship->GetAttribute(AttrMass).get_double();
+    if (!sFltSvc.ConsumeJumpPortalMass(otherShipID->value(), mass)) {
+        call.client->SendNotifyMsg("Insufficient jump portal mass capacity.");
+        return PyStatic.NewNone();
+    }
+
+    call.client->CynoJump(beacon);
+    return this->GetOID();
 }
 
 PyResult BeyonceBound::CmdJumpThroughCorporationStructure(PyCallArgs &call, PyInt* itemID, PyInt* remoteStructureID, PyInt* remoteSystemID) {
@@ -1147,6 +1321,8 @@ PyResult BeyonceBound::CmdBeaconJumpFleet(PyCallArgs &call, PyInt* characterID, 
     }
 
     InventoryItemRef beacon = sItemFactory.GetItemRefFromID(beaconID->value());
+    if (!ValidateBeaconForCapitalJump(beacon, solarSystemID->value(), call.client))
+        return PyStatic.NewNone();
 
     //Check for jump fuel and make sure there is enough fuel available
     ShipItemRef ship = call.client->GetShip();
@@ -1231,6 +1407,8 @@ PyResult BeyonceBound::CmdBeaconJumpAlliance(PyCallArgs &call, PyInt* beaconID, 
     }
 
     InventoryItemRef beacon = sItemFactory.GetItemRefFromID(beaconID->value());
+    if (!ValidateBeaconForCapitalJump(beacon, solarSystemID->value(), call.client))
+        return PyStatic.NewNone();
 
     //Check for jump fuel and make sure there is enough fuel available
     ShipItemRef ship = call.client->GetShip();

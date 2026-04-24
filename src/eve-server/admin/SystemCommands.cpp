@@ -67,6 +67,7 @@ static PyResult UpdateBubble(Client *pClient) {
         return new PyString("SessionChange Active.  Request Denied.");
     }
 
+    pClient->GetShipSE()->DestinyMgr()->Halt();
     pClient->GetShipSE()->DestinyMgr()->SetPosition(pClient->GetShipSE()->GetPosition(), true);
 
     SystemBubble *pBubble = pClient->GetShipSE()->SysBubble();

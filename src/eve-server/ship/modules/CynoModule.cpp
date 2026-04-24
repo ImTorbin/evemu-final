@@ -6,13 +6,66 @@
   */
 
 #include "ship/modules/CynoModule.h"
+#include "inventory/AttributeEnum.h"
+#include "inventory/Inventory.h"
+#include "map/MapDB.h"
 #include "system/SystemManager.h"
 #include "fleet/FleetService.h"
 #include "pos/Tower.h"
 #include "system/sov/SovereigntyDataMgr.h"
 
-CynoModule::CynoModule(ModuleItemRef mRef, ShipItemRef sRef)
+namespace {
+
+/** Used when static data omits AttrConsumptionType (Liquid Ozone per cycle). */
+constexpr uint32 LIQUID_OZONE_PER_CYCLE_FALLBACK = 400;
+
+uint32 LiquidOzoneQtyPerCycle(const ModuleItemRef& mod)
+{
+    if (mod->HasAttribute(AttrConsumptionType) && mod->HasAttribute(AttrConsumptionQuantity)) {
+        const uint32 ctype = mod->GetAttribute(AttrConsumptionType).get_uint32();
+        if (ctype == EVEDB::invTypes::LiquidOzone) {
+            const uint32 q = mod->GetAttribute(AttrConsumptionQuantity).get_uint32();
+            return q < 1u ? 1u : q;
+        }
+        return 0;
+    }
+    return LIQUID_OZONE_PER_CYCLE_FALLBACK;
+}
+
+/** Remove qty of type from cargo hold (may span multiple stacks). */
+bool ConsumeFromCargoHold(ShipItemRef ship, uint16 typeID, uint32 qtyNeed)
+{
+    if (!ship->GetMyInventory()->ContainsTypeQtyByFlag(typeID, flagCargoHold, qtyNeed))
+        return false;
+
+    uint32 quantityLeft = qtyNeed;
+    std::vector<InventoryItemRef> stacks;
+    ship->GetMyInventory()->GetItemsByFlag(flagCargoHold, stacks);
+    for (auto cur : stacks) {
+        if (cur->typeID() != typeID)
+            continue;
+        if (cur->quantity() >= quantityLeft) {
+            cur->AlterQuantity(-(int32)quantityLeft, true);
+            break;
+        }
+        quantityLeft -= cur->quantity();
+        cur->SetQuantity(0, true, true);
+        if (quantityLeft < 1)
+            break;
+    }
+    return quantityLeft < 1;
+}
+
+} // namespace
+
+CynoModule::CynoModule(ModuleItemRef mRef, ShipItemRef sRef,
+                       uint32 fieldTypeID,
+                       bool requiresFleet,
+                       bool blockedBySovJammer)
 : ActiveModule(mRef, sRef),
+m_fieldTypeID(fieldTypeID),
+m_requiresFleet(requiresFleet),
+m_blockedBySovJammer(blockedBySovJammer),
 pClient(nullptr),
 pShipSE(nullptr),
 cSE(nullptr),
@@ -51,19 +104,33 @@ void CynoModule::Activate(uint16 effectID, uint32 targetID, int16 repeat)
 void CynoModule::DeactivateCycle(bool abort)
 {
     SendOnJumpBeaconChange(false);
-    cSE->Delete();
-    SafeDelete(cSE);
+
+    const uint32 beaconID = (cSE != nullptr ? cSE->GetID() : 0);
+    if (beaconID != 0)
+        sFltSvc.InvalidateBridgesToBeacon(beaconID);
+
+    if (pClient != nullptr && cSE != nullptr) {
+        sFltSvc.UnregisterActiveBeacon(pClient->GetCharacterID());
+        MapDB::AdjustCynoModuleCount(pClient->GetLocationID(), -1);
+    }
+
+    if (cSE != nullptr) {
+        cSE->Delete();
+        SafeDelete(cSE);
+    }
     ActiveModule::DeactivateCycle(abort);
 
     // hack to reinstate ship movement here
     // may have to reset/reapply all fx for ship movement
-    pShipSE->GetSelf()->SetAttribute(AttrMaxVelocity, m_shipVelocity);
-    pShipSE->DestinyMgr()->SetFrozen(false);
+    if (pShipSE != nullptr) {
+        pShipSE->GetSelf()->SetAttribute(AttrMaxVelocity, m_shipVelocity);
+        pShipSE->DestinyMgr()->SetFrozen(false);
+    }
 }
 
 bool CynoModule::CanActivate()
 {
-    if (!pClient->InFleet())
+    if (m_requiresFleet && !pClient->InFleet())
         throw UserError("CynoMustBeInFleet");
 
     if (pShipSE->SysBubble()->HasTower()) {
@@ -73,22 +140,28 @@ bool CynoModule::CanActivate()
                 throw UserError("NoCynoInPOSShields");
     }
 
-    /** @todo check for active cyno jammer */
-
-    //if (m_sysMgr->HasCynoJammer())
-    //    throw UserError("CynosuralGenerationJammed");
-
-    //Send message if the system is being jammed
     SovereigntyData sovData = svDataMgr.GetSovereigntyData(pClient->GetLocationID());
-    if (sovData.jammerID != 0) {
-        pClient->SendNotifyMsg("This system is currently being jammed.");
-        return false;
+    if (sConfig.world.enforceSovJammer && m_blockedBySovJammer && sovData.jammerID != 0)
+        throw UserError("CynosuralGenerationJammed");
+
+    // Make sure player is not in high-sec (configurable). Compare map security, not internal GetSecValue().
+    if (!sConfig.world.highSecCyno) {
+        if (pClient->SystemMgr()->GetMapSecurityStatus() >= 0.5f) {
+            pClient->SendNotifyMsg("This module may not be used in high security space.");
+            return false;
+        }
     }
 
-    //Make sure player is not in high-sec (configurable)
-    if (!sConfig.world.highSecCyno) {
-        if (pClient->SystemMgr()->GetSecValue() >= 0.5f) {
-            pClient->SendNotifyMsg("This module may not be used in high security space.");
+    /* Liquid ozone: ActiveModule::CanActivate only checks AttrConsumption* when present in dogma.
+     * If missing, enforce a per-cycle LOZ requirement (matches client / live behavior). */
+    const uint32 lozQty = LiquidOzoneQtyPerCycle(m_modRef);
+    if (!m_modRef->HasAttribute(AttrConsumptionType)) {
+        if (!m_shipRef->GetMyInventory()->ContainsTypeQtyByFlag(
+                EVEDB::invTypes::LiquidOzone, flagCargoHold, lozQty)) {
+            pClient->SendNotifyMsg(
+                "This module requires you to have %u units of %s in your cargo hold.",
+                lozQty,
+                sItemFactory.GetType(EVEDB::invTypes::LiquidOzone)->name().c_str());
             return false;
         }
     }
@@ -116,11 +189,23 @@ void CynoModule::CreateCyno()
     if (cSE != nullptr)
         return;
 
-    // Create Cyno field here
-    ItemData cData(EVEDB::invTypes::CynosuralFieldI, pClient->GetCharacterID(), m_sysMgr->GetID(), flagNone);
+    /* When dogma has no consumption attributes, deduct LOZ here (DoCycle skips in that case). */
+    if (!m_modRef->HasAttribute(AttrConsumptionType)) {
+        const uint32 lozQty = LiquidOzoneQtyPerCycle(m_modRef);
+        if (!ConsumeFromCargoHold(m_shipRef, EVEDB::invTypes::LiquidOzone, lozQty)) {
+            m_shipRef->GetPilot()->SendNotifyMsg(
+                "This module requires you to have %u units of %s in your cargo hold.",
+                lozQty,
+                sItemFactory.GetType(EVEDB::invTypes::LiquidOzone)->name().c_str());
+            AbortCycle();
+            return;
+        }
+    }
+
+    ItemData cData(m_fieldTypeID, pClient->GetCharacterID(), m_sysMgr->GetID(), flagNone);
     InventoryItemRef cRef = sItemFactory.SpawnItem(cData);
 
-    _log(MODULE__DEBUG, "Creating Cynosural field");
+    _log(MODULE__DEBUG, "Creating Cynosural field (type %u)", m_fieldTypeID);
 
     cSE = new ItemSystemEntity(cRef, pClient->services(), m_sysMgr);
     GPoint location(pShipSE->GetPosition());
@@ -128,6 +213,10 @@ void CynoModule::CreateCyno()
     cSE->SetPosition(location);
     cRef->SaveItem();
     m_sysMgr->AddEntity(cSE);
+
+    const bool covert = (m_fieldTypeID == EVEDB::invTypes::CovertCynosuralFieldI);
+    sFltSvc.RegisterActiveBeacon(pClient->GetCharacterID(), cRef->itemID(), m_sysMgr->GetID(), covert);
+    MapDB::AdjustCynoModuleCount(m_sysMgr->GetID(), 1);
 
     SendOnJumpBeaconChange(true);
 }
@@ -145,6 +234,9 @@ void CynoModule::SendOnJumpBeaconChange(bool active/*false*/) {
             data->SetItem(1, new PyInt(m_sysMgr->GetID()));
             data->SetItem(2, new PyInt(fieldID));
             data->SetItem(3, new PyBool(active));
+
+        if (!pClient->InFleet())
+            return;
 
         std::vector<Client *> fleetClients;
         fleetClients = sFltSvc.GetFleetClients(pClient->GetFleetID());

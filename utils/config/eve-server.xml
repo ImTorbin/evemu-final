@@ -19,7 +19,7 @@ boolean can use either 0/1 OR true/false.
         7131450020691447808 (0x62f8000280c40000)  ROLE_DEV     = ROLE_CREATOR | ROLE_QA | ROLE_PROGRAMMER
         7203507614729375744 (0x63f8000280c40000)  ROLE_BOSS    = ROLE_ADMIN | ROLE_DEV
         -->
-        <autoAccountRole>7203507614729375744</autoAccountRole>
+        <autoAccountRole>6917529027641081856</autoAccountRole>
         <!--
         <loginMessage>
             &lt;html&gt;
@@ -76,6 +76,8 @@ boolean can use either 0/1 OR true/false.
         <saveOnUpdate>true</saveOnUpdate><!-- bool - save items when values or attributes updated -->
         <shipBoardDistance>500</shipBoardDistance><!-- int  - max distance to board ship in space (5c default) -->
         <highSecCyno>false</highSecCyno><!-- bool - allow Cynosural fields to be created in high security space -->
+        <!-- When true, mapSystemSovInfo.jammerID blocks ship cynos and jump-bridge online. Default false; set true only if SOV/jammer state is maintained correctly. -->
+        <enforceSovJammer>false</enforceSovJammer>
     </world>
 
     <rates>

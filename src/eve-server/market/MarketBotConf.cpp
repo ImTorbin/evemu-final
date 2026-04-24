@@ -11,6 +11,9 @@
 
 
 
+#include <cstring>
+#include <cstdlib>
+
 #include "market/MarketBotConf.h"
 
 
@@ -19,48 +22,35 @@ MarketBotConf::MarketBotConf()
     // register needed parsers
     AddMemberParser( "marketBot", &MarketBotConf::ProcessBotConf );
 
-    // Set sane defaults
-    // items with a "N" behind them are NOT implemented
-    // items with a "P" behind them are PARTIALLY implemented
-    // items with /*x*/ behind them denote time idetifier, with x = (s=seconds, m=minutes, etc)
-
     // main
-    main.EnableRegional = false;//N
-    main.EnableConst = false;//N
-    main.DataRefreshTime = 15/*m*/;//N
-    main.OrderLifetime = 5/*d*/;//N
-    main.OrdersPerRefresh = 10;//N
-    main.MaxISKPerOrder = 1500000000;//N
+    main.DataRefreshTime = 15;
+    main.OrderLifetime = 5;
+    main.MaxISKPerOrder = 1500000000;
 
-    // buy
-    buy.RegionJumps = 10;//N
-    buy.ConstJumps = 8;//N
-    buy.SystemJumps = 5;//N
-    buy.OrdersPerRegion = 35;//N
-    buy.OrdersPerConst = 20;//N
-    buy.OrdersPerSystem = 10;//N
-    buy.DupeOrdersPerRegion = 10;//N
-    buy.DupeOrdersPerConst = 5;//N
-    buy.DupeOrdersPerSystem = 2;//N
-    buy.MinBuyAmount = 1;//N
+    // buy (hub-heavy liquidity + light sprinkle elsewhere)
+    buy.HubBuyOrdersPerRefresh = 120;
+    buy.SprinkleSystemsCount = 5;
+    buy.SprinkleBuyOrdersPerRefresh = 10;
+    buy.HubBuyPriceMinMult = 0.95f;
+    buy.HubBuyPriceMaxMult = 1.15f;
+    buy.SprinkleBuyPriceMinMult = 0.80f;
+    buy.SprinkleBuyPriceMaxMult = 1.10f;
+    buy.MinBuyAmount = 1;
 
     // sell
-    sell.SellNamedItem = false;//N
-    sell.OrdersPerRegion = 20;//N
-    sell.OrdersPerConst = 10;//N
-    sell.OrdersPerSystem = 2;//N
-    sell.DupeOrdersPerRegion = 5;//N
-    sell.DupeOrdersPerConst = 3;//N
-    sell.DupeOrdersPerSystem = 1;//N
-    sell.SellItemMetaLevelMin = 0;//N
-    sell.SellItemMetaLevelMax = 4;//N
-    sell.MinSellAmount = 1;//N
+    sell.SellNamedItem = false;
+    sell.HubSellOrdersPerRefresh = 80;
+    sell.SprinkleSellOrdersPerRefresh = 10;
+    sell.SellItemMetaLevelMin = 0;
+    sell.SellItemMetaLevelMax = 4;
+    sell.MinSellAmount = 1;
 }
 
 bool MarketBotConf::ProcessBotConf(const TiXmlElement* ele)
 {
     // entering element, extend allowed syntax
     AddMemberParser( "main",      &MarketBotConf::ProcessMain );
+    AddMemberParser( "hubs",      &MarketBotConf::ProcessHubs );
     AddMemberParser( "buy",       &MarketBotConf::ProcessBuy );
     AddMemberParser( "sell",      &MarketBotConf::ProcessSell );
 
@@ -69,6 +59,7 @@ bool MarketBotConf::ProcessBotConf(const TiXmlElement* ele)
 
     // leaving element, reduce allowed syntax
     RemoveParser( "main" );
+    RemoveParser( "hubs" );
     RemoveParser( "buy" );
     RemoveParser( "sell" );
 
@@ -78,77 +69,77 @@ bool MarketBotConf::ProcessBotConf(const TiXmlElement* ele)
 
 bool MarketBotConf::ProcessMain(const TiXmlElement* ele)
 {
-    AddValueParser( "EnableRegional",           main.EnableRegional );
-    AddValueParser( "EnableConst",              main.EnableConst );
     AddValueParser( "DataRefreshTime",          main.DataRefreshTime );
     AddValueParser( "OrderLifetime",            main.OrderLifetime );
-    AddValueParser( "OrdersPerRefresh",         main.OrdersPerRefresh );
     AddValueParser( "MaxISKPerOrder",           main.MaxISKPerOrder );
 
     const bool result = ParseElementChildren( ele );
 
-    RemoveParser( "EnableRegional" );
-    RemoveParser( "EnableConst" );
     RemoveParser( "DataRefreshTime" );
     RemoveParser( "OrderLifetime" );
-    RemoveParser( "OrdersPerRefresh" );
     RemoveParser( "MaxISKPerOrder" );
 
     return result;
 }
 
+bool MarketBotConf::ProcessHubs(const TiXmlElement* ele)
+{
+    hubs.stationIDs.clear();
+    for (const TiXmlElement* child = ele->FirstChildElement(); child; child = child->NextSiblingElement()) {
+        if (std::strcmp(child->Value(), "station") != 0)
+            continue;
+        uint32 sid = 0;
+        const char* aid = child->Attribute("id");
+        if (aid != nullptr)
+            sid = static_cast<uint32>(std::strtoul(aid, nullptr, 10));
+        else if (child->GetText() != nullptr)
+            sid = static_cast<uint32>(std::strtoul(child->GetText(), nullptr, 10));
+        if (sid != 0)
+            hubs.stationIDs.push_back(sid);
+    }
+    return true;
+}
+
 bool MarketBotConf::ProcessBuy(const TiXmlElement* ele)
 {
-    AddValueParser( "MinBuyAmount",             buy.MinBuyAmount );
-    AddValueParser( "RegionJumps",              buy.RegionJumps );
-    AddValueParser( "ConstJumps",               buy.ConstJumps );
-    AddValueParser( "SystemJumps",              buy.SystemJumps );
-    AddValueParser( "OrdersPerRegion",          buy.OrdersPerRegion );
-    AddValueParser( "OrdersPerConst",           buy.OrdersPerConst );
-    AddValueParser( "OrdersPerSystem",          buy.OrdersPerSystem );
-    AddValueParser( "DupeOrdersPerRegion",      buy.DupeOrdersPerRegion );
-    AddValueParser( "DupeOrdersPerConst",       buy.DupeOrdersPerConst );
-    AddValueParser( "DupeOrdersPerSystem",      buy.DupeOrdersPerSystem );
+    AddValueParser( "HubBuyOrdersPerRefresh",       buy.HubBuyOrdersPerRefresh );
+    AddValueParser( "SprinkleSystemsCount",         buy.SprinkleSystemsCount );
+    AddValueParser( "SprinkleBuyOrdersPerRefresh",  buy.SprinkleBuyOrdersPerRefresh );
+    AddValueParser( "HubBuyPriceMinMult",           buy.HubBuyPriceMinMult );
+    AddValueParser( "HubBuyPriceMaxMult",           buy.HubBuyPriceMaxMult );
+    AddValueParser( "SprinkleBuyPriceMinMult",      buy.SprinkleBuyPriceMinMult );
+    AddValueParser( "SprinkleBuyPriceMaxMult",      buy.SprinkleBuyPriceMaxMult );
+    AddValueParser( "MinBuyAmount",                 buy.MinBuyAmount );
 
     const bool result = ParseElementChildren( ele );
 
+    RemoveParser( "HubBuyOrdersPerRefresh" );
+    RemoveParser( "SprinkleSystemsCount" );
+    RemoveParser( "SprinkleBuyOrdersPerRefresh" );
+    RemoveParser( "HubBuyPriceMinMult" );
+    RemoveParser( "HubBuyPriceMaxMult" );
+    RemoveParser( "SprinkleBuyPriceMinMult" );
+    RemoveParser( "SprinkleBuyPriceMaxMult" );
     RemoveParser( "MinBuyAmount" );
-    RemoveParser( "RegionJumps" );
-    RemoveParser( "ConstJumps" );
-    RemoveParser( "SystemJumps" );
-    RemoveParser( "OrdersPerRegion" );
-    RemoveParser( "OrdersPerConst" );
-    RemoveParser( "OrdersPerSystem" );
-    RemoveParser( "DupeOrdersPerRegion" );
-    RemoveParser( "DupeOrdersPerConst" );
-    RemoveParser( "DupeOrdersPerSystem" );
 
     return result;
 }
 
 bool MarketBotConf::ProcessSell(const TiXmlElement* ele)
 {
-    AddValueParser( "SellNamedItem",            sell.SellNamedItem );
-    AddValueParser( "MinSellAmount",            sell.MinSellAmount );
-    AddValueParser( "OrdersPerRegion",          sell.OrdersPerRegion );
-    AddValueParser( "OrdersPerConst",           sell.OrdersPerConst );
-    AddValueParser( "OrdersPerSystem",          sell.OrdersPerSystem );
-    AddValueParser( "DupeOrdersPerRegion",      sell.DupeOrdersPerRegion );
-    AddValueParser( "DupeOrdersPerConst",       sell.DupeOrdersPerConst );
-    AddValueParser( "DupeOrdersPerSystem",      sell.DupeOrdersPerSystem );
-    AddValueParser( "SellItemMetaLevelMin",     sell.SellItemMetaLevelMin );
-    AddValueParser( "SellItemMetaLevelMax",     sell.SellItemMetaLevelMax );
+    AddValueParser( "SellNamedItem",                sell.SellNamedItem );
+    AddValueParser( "HubSellOrdersPerRefresh",      sell.HubSellOrdersPerRefresh );
+    AddValueParser( "SprinkleSellOrdersPerRefresh", sell.SprinkleSellOrdersPerRefresh );
+    AddValueParser( "MinSellAmount",                sell.MinSellAmount );
+    AddValueParser( "SellItemMetaLevelMin",         sell.SellItemMetaLevelMin );
+    AddValueParser( "SellItemMetaLevelMax",         sell.SellItemMetaLevelMax );
 
     const bool result = ParseElementChildren( ele );
 
     RemoveParser( "SellNamedItem" );
+    RemoveParser( "HubSellOrdersPerRefresh" );
+    RemoveParser( "SprinkleSellOrdersPerRefresh" );
     RemoveParser( "MinSellAmount" );
-    RemoveParser( "OrdersPerRegion" );
-    RemoveParser( "OrdersPerConst" );
-    RemoveParser( "OrdersPerSystem" );
-    RemoveParser( "DupeOrdersPerRegion" );
-    RemoveParser( "DupeOrdersPerConst" );
-    RemoveParser( "DupeOrdersPerSystem" );
     RemoveParser( "SellItemMetaLevelMax" );
     RemoveParser( "SellItemMetaLevelMin" );
 

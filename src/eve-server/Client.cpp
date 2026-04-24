@@ -495,8 +495,25 @@ void Client::ProcessClient() {
                     } break;
                 case Player::State::LoginWarp: {
                     _log(CLIENT__TIMER, "ProcessClient()::CheckState():  case: LoginWarp");
+                    // Copy before any destiny call: SetLoginWarpComplete() (from InitWarp / other
+                    // warps) clears m_loginWarpPoint; a stale timer or re-entrant path would otherwise
+                    // WarpTo(NULL_ORIGIN) and blow up the client warp FX (Python NoneType.radius).
+                    GPoint warpDest(m_loginWarpPoint);
+                    if (warpDest.isZero() || warpDest.isNaN() || warpDest.isInf()) {
+                        warpDest = m_ship->position();
+                        _log(CLIENT__WARNING, "ProcessClient::LoginWarp: saved login point invalid for %s — using ship position.",
+                            m_char->name());
+                    }
+                    if (warpDest.isZero() || warpDest.isNaN() || warpDest.isInf()) {
+                        sLog.Error("ProcessClient::LoginWarp", "%s: no valid warp destination; completing login without warp.",
+                            m_char->name());
+                        SetLoginWarpComplete();
+                        m_clientState = Player::State::Idle;
+                        pShipSE->DestinyMgr()->UnCloak();
+                        break;
+                    }
                     pShipSE->DestinyMgr()->UnCloak();
-                    pShipSE->DestinyMgr()->WarpTo(m_loginWarpPoint);
+                    pShipSE->DestinyMgr()->WarpTo(warpDest);
                     } break;
                 case Player::State::Jump: {
                     _log(CLIENT__TIMER, "ProcessClient()::CheckState():  case: Jump");
@@ -571,6 +588,10 @@ void Client::UpdateBubble() {
         EnterSystem(GetSystemID());
     }
 
+    // Clear any stale velocity / mode before an authoritative position snap (login
+    // rebubble, GM tools). SetPosition alone does not zero m_velocity; leftover
+    // warp or align state produced observer/pilot velocity bundles with snaps.
+    GetShipSE()->DestinyMgr()->Halt();
     GetShipSE()->DestinyMgr()->SetPosition(GetShipSE()->GetPosition(), true);
 
     SystemBubble *pBubble = GetShipSE()->SysBubble();

@@ -14,6 +14,7 @@
 
 #include "eve-server.h"
 #include "chat/LSCService.h"
+#include "utils/utils_time.h"
 #include "fleet/FleetService.h"
 #include "system/SystemBubble.h"
 #include "system/SystemManager.h"
@@ -51,6 +52,8 @@ void FleetService::Initialize(EVEServiceManager& svc)
     m_fleetDataMap.clear();
     m_squadDataMap.clear();
     m_fleetAdvertMap.clear();
+    m_activeBeaconByChar.clear();
+    m_activeBridgeByShip.clear();
 
     //  these will have to be incremented individually, then stored according to fleet
     m_fleetID = FLEET_ID;  //950000000
@@ -2050,4 +2053,108 @@ std::string FleetService::GetBoosterData(uint32 fleetID, uint16& length)
     }
 
     return str.str();
+}
+
+void FleetService::RegisterActiveBeacon(uint32 charID, uint32 beaconItemID, uint32 solarSystemID, bool covert)
+{
+    FleetBeaconEntry e;
+    e.beaconItemID = beaconItemID;
+    e.solarSystemID = solarSystemID;
+    e.covert = covert;
+    m_activeBeaconByChar[charID] = e;
+}
+
+void FleetService::UnregisterActiveBeacon(uint32 charID)
+{
+    m_activeBeaconByChar.erase(charID);
+}
+
+bool FleetService::GetActiveBeaconForChar(uint32 charID, FleetBeaconEntry& out) const
+{
+    auto it = m_activeBeaconByChar.find(charID);
+    if (it == m_activeBeaconByChar.end())
+        return false;
+    out = it->second;
+    return true;
+}
+
+bool FleetService::FindCompatibleFleetBeacon(uint32 fleetID, bool requireCovert, FleetBeaconEntry& out) const
+{
+    auto range = m_fleetMembers.equal_range(fleetID);
+    for (auto it = range.first; it != range.second; ++it) {
+        Client* c = it->second;
+        if (c == nullptr)
+            continue;
+        FleetBeaconEntry e;
+        if (!GetActiveBeaconForChar(c->GetCharacterID(), e))
+            continue;
+        if (e.covert == requireCovert) {
+            out = e;
+            return true;
+        }
+    }
+    return false;
+}
+
+void FleetService::RegisterJumpPortal(uint32 bridgeShipID, uint32 beaconItemID, uint32 solarSystemID,
+                                      bool covert, double totalMassKg, double massCostFactor, int64 expirySteadyMs)
+{
+    FleetBridgeEntry ent;
+    ent.bridgeShipID = bridgeShipID;
+    ent.beaconItemID = beaconItemID;
+    ent.solarSystemID = solarSystemID;
+    ent.covert = covert;
+    ent.remainingMassKg = totalMassKg;
+    ent.massCostFactor = massCostFactor;
+    ent.expirySteadyMs = expirySteadyMs;
+    m_activeBridgeByShip[bridgeShipID] = ent;
+}
+
+void FleetService::UnregisterJumpPortal(uint32 bridgeShipID)
+{
+    m_activeBridgeByShip.erase(bridgeShipID);
+}
+
+bool FleetService::GetActiveBridgeForShip(uint32 bridgeShipID, FleetBridgeEntry& out) const
+{
+    auto it = m_activeBridgeByShip.find(bridgeShipID);
+    if (it == m_activeBridgeByShip.end())
+        return false;
+    if (GetSteadyTime() > it->second.expirySteadyMs) {
+        const_cast<FleetService*>(this)->m_activeBridgeByShip.erase(it);
+        return false;
+    }
+    out = it->second;
+    return true;
+}
+
+bool FleetService::ConsumeJumpPortalMass(uint32 bridgeShipID, double shipMassKg)
+{
+    auto it = m_activeBridgeByShip.find(bridgeShipID);
+    if (it == m_activeBridgeByShip.end())
+        return false;
+    if (GetSteadyTime() > it->second.expirySteadyMs) {
+        m_activeBridgeByShip.erase(it);
+        return false;
+    }
+
+    double cost = shipMassKg * it->second.massCostFactor;
+    if (cost <= 0.0)
+        cost = shipMassKg;
+
+    if (it->second.remainingMassKg + 1e-6 < cost)
+        return false;
+
+    it->second.remainingMassKg -= cost;
+    return true;
+}
+
+void FleetService::InvalidateBridgesToBeacon(uint32 beaconItemID)
+{
+    for (auto it = m_activeBridgeByShip.begin(); it != m_activeBridgeByShip.end(); ) {
+        if (it->second.beaconItemID == beaconItemID)
+            it = m_activeBridgeByShip.erase(it);
+        else
+            ++it;
+    }
 }

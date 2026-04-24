@@ -892,6 +892,7 @@ void StructureSE::SetOnline()
 
     if (m_generator) {
         svDataMgr.UpdateSystemBeaconID(m_self->locationID(),m_self->itemID());
+        MapDB::AdjustCynoStructureCount(m_self->locationID(), 1);
     }
     if (m_jammer) {
         svDataMgr.UpdateSystemJammerID(m_self->locationID(),m_self->itemID());
@@ -905,6 +906,7 @@ void StructureSE::SetOffline()
         m_towerSE->OfflineModule(this);
     if (m_generator) {
         svDataMgr.UpdateSystemBeaconID(m_self->locationID(),0);
+        MapDB::AdjustCynoStructureCount(m_self->locationID(), -1);
     }
     if (m_jammer) {
         svDataMgr.UpdateSystemJammerID(m_self->locationID(),0);

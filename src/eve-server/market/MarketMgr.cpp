@@ -12,6 +12,7 @@
   */
 
 #include "Client.h"
+#include "EVE_Defines.h"
 #include "EVEServerConfig.h"
 #include "StaticDataMgr.h"
 #include "StatisticMgr.h"
@@ -310,6 +311,8 @@ bool MarketMgr::ExecuteBuyOrder(Client* seller, uint32 orderID, InventoryItemRef
 
     // get buyer id and determine if buyer is player, corp, or npc/bot
     bool isPlayer(false), isCorp(false), isTraderJoe(false), isTrader(false);
+    /** Seed / MarketBot orders use IsNPCCorp ownerID (e.g. CONCORD); items are sunk like Trader Joe, ISK from station escrow. */
+    bool isNpcCorpBuyer(false);
 
     if (IsPlayerCorp(oInfo.ownerID)) {
         isCorp = true;
@@ -321,6 +324,8 @@ bool MarketMgr::ExecuteBuyOrder(Client* seller, uint32 orderID, InventoryItemRef
         isTraderJoe = true;
     } else if (IsTrader(oInfo.ownerID)) {
         isTrader = true;
+    } else if (IsNPCCorp(oInfo.ownerID)) {
+        isNpcCorpBuyer = true;
     } else {
         // none of above conditionals hit....
         _log(MARKET__WARNING, "ExecuteBuyOrder - ownerID %u not corp, not char, not system, not joe.", oInfo.ownerID);
@@ -353,7 +358,7 @@ bool MarketMgr::ExecuteBuyOrder(Client* seller, uint32 orderID, InventoryItemRef
 
             // use the "owner change" packet to alert the buyer of the new item
             iRef->Donate(oInfo.ownerID, stationID, flagCorpMarket, true);
-        } else if (isTraderJoe || isTrader) {
+        } else if (isNpcCorpBuyer || isTraderJoe || isTrader) {
             // Trader joe is a placeholder ID that deletes every item sold to
             // him. Other trader accounts behave similarly to Trader Joe, but we
             // keep valid journal entries for them
@@ -371,7 +376,7 @@ bool MarketMgr::ExecuteBuyOrder(Client* seller, uint32 orderID, InventoryItemRef
 
         _log(MARKET__TRACE, "ExecuteBuyOrder - order is Over");
 
-        if (isTraderJoe || isTrader) {
+        if (isNpcCorpBuyer || isTraderJoe || isTrader) {
             // NPC trader joe is a blackhole, just subtract the amount of items
             // we're selling to him and call it a day. Also applies to other
             // trader NPCs.
@@ -404,7 +409,7 @@ bool MarketMgr::ExecuteBuyOrder(Client* seller, uint32 orderID, InventoryItemRef
             iRef->Donate(oInfo.ownerID, stationID, flagHangar, true);
         } else if (isCorp) {
             iRef->Donate(oInfo.ownerID, stationID, flagCorpMarket, true);
-        } else if (isTraderJoe || isTrader) {
+        } else if (isNpcCorpBuyer || isTraderJoe || isTrader) {
             shouldDeleteItem = true;
         }
     }
@@ -461,8 +466,8 @@ bool MarketMgr::ExecuteBuyOrder(Client* seller, uint32 orderID, InventoryItemRef
     reason += "DESC:  Selling items in ";
     reason += stDataMgr.GetStationName(stationID).c_str();
 
-    // this is fulfilling a buy order.  seller will receive isk from escrow if buyer is player or corp
-    if (isPlayer or isCorp) {
+    // this is fulfilling a buy order.  seller will receive isk from escrow if buyer is player, corp, or NPC corp (seed/bot orders funded into escrow)
+    if (isPlayer or isCorp or isNpcCorpBuyer) {
         // give the money to the seller from the escrow acct at station
         AccountService::TransferFunds(
             stDataMgr.GetOwnerID(stationID),

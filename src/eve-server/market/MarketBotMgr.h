@@ -24,6 +24,8 @@ using TimePoint = std::chrono::time_point<Clock>;
 #include "eve-common.h"
 #include "utils/Singleton.h"
 
+#include <vector>
+
 class MarketBotDataMgr
 : public Singleton<MarketBotDataMgr>
 {
@@ -53,22 +55,35 @@ public:
 
     void AddSystem();
     void RemoveSystem();
-    // ---marketbot changes
-    int PlaceBuyOrders(uint32 systemID);
-    int PlaceSellOrders(uint32 systemID);
+
     int ExpireOldOrders();
 
-    std::vector<uint32> GetEligibleSystems();
+    std::vector<uint32> GetSprinkleSystems();
     uint32 SelectRandomItemID();
     uint32 GetRandomQuantity(uint32 groupID);
-    double CalculateBuyPrice(uint32 itemID);
     double CalculateSellPrice(uint32 itemID);
 
     void ForceRun(bool resetTimer = true); // debug command to force MarketBot to run first cycle to generate NPC buy and sell orders.
-    // ---
+
 private:
+    struct ResolvedHub {
+        uint32 stationID;
+        uint32 solarSystemID;
+        uint32 regionID;
+    };
+
+    void ResolveTradeHubsIfNeeded();
+    int PlaceBuyOrdersAtHub(const ResolvedHub& hub);
+    int PlaceSellOrdersAtHub(const ResolvedHub& hub);
+    int PlaceBuyOrdersSprinkle(uint32 systemID);
+    int PlaceSellOrdersSprinkle(uint32 systemID);
+
+    double CalculateBuyPrice(uint32 itemID, float priceMinMult, float priceMaxMult);
+
     TimePoint m_nextRunTime;
     bool m_initalized;
+    bool m_tradeHubsResolved;
+    std::vector<ResolvedHub> m_tradeHubs;
 };
 
 //Singleton

@@ -58,13 +58,13 @@ void JumpBridgeSE::SetOnline()
 
     // Make sure the system is not being jammed
     SovereigntyData sovData = svDataMgr.GetSovereigntyData(m_self->locationID());
-    if (sovData.jammerID != 0) {
+    if (sConfig.world.enforceSovJammer && sovData.jammerID != 0) {
         throw CustomError("This system is currently being jammed.");
     }
 
-    // Make sure player is not in high-sec (configurable)
+    // Make sure player is not in high-sec (configurable). Use map security, not internal GetSecValue().
     if (!sConfig.world.highSecCyno) {
-        if (m_system->GetSecValue() >= 0.5f) {
+        if (m_system->GetMapSecurityStatus() >= 0.5f) {
             throw CustomError("This module may not be used in high security space.");
         }
     }

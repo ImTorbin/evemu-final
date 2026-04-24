@@ -10,6 +10,8 @@
 #ifndef EVEMU_MARKET_BOTCONFIG_H_
 #define EVEMU_MARKET_BOTCONFIG_H_
 
+#include <vector>
+
 #include "../eve-server.h"
 #include "../../eve-core/utils/XMLParserEx.h"
 
@@ -25,26 +27,27 @@ public:
     // From <main/>
     struct
     {
-        bool EnableRegional;
-        bool EnableConst;
         uint8 DataRefreshTime;
         uint8 OrderLifetime;
-        uint16 OrdersPerRefresh;
         uint32 MaxISKPerOrder;
     } main;
+
+    // Empire trade hub stationIDs (from <hubs><station id="..."/></hubs>)
+    struct
+    {
+        std::vector<uint32> stationIDs;
+    } hubs;
 
     // From <buy/>
     struct
     {
-        uint8 RegionJumps;
-        uint8 ConstJumps;
-        uint8 SystemJumps;
-        uint8 OrdersPerRegion;
-        uint8 OrdersPerConst;
-        uint8 OrdersPerSystem;
-        uint8 DupeOrdersPerRegion;
-        uint8 DupeOrdersPerConst;
-        uint8 DupeOrdersPerSystem;
+        uint32 HubBuyOrdersPerRefresh;
+        uint32 SprinkleSystemsCount;
+        uint32 SprinkleBuyOrdersPerRefresh;
+        float HubBuyPriceMinMult;
+        float HubBuyPriceMaxMult;
+        float SprinkleBuyPriceMinMult;
+        float SprinkleBuyPriceMaxMult;
         uint8 MinBuyAmount;
     } buy;
 
@@ -52,12 +55,8 @@ public:
     struct
     {
         bool SellNamedItem;
-        uint8 OrdersPerRegion;
-        uint8 OrdersPerConst;
-        uint8 OrdersPerSystem;
-        uint8 DupeOrdersPerRegion;
-        uint8 DupeOrdersPerConst;
-        uint8 DupeOrdersPerSystem;
+        uint32 HubSellOrdersPerRefresh;
+        uint32 SprinkleSellOrdersPerRefresh;
         uint8 SellItemMetaLevelMin;
         uint8 SellItemMetaLevelMax;
         uint8 MinSellAmount;
@@ -66,6 +65,7 @@ public:
 protected:
     bool ProcessBotConf( const TiXmlElement* ele );
     bool ProcessMain( const TiXmlElement* ele );
+    bool ProcessHubs( const TiXmlElement* ele );
     bool ProcessBuy( const TiXmlElement* ele );
     bool ProcessSell( const TiXmlElement* ele );
 };

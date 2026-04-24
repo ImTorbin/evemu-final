@@ -589,9 +589,18 @@ uint32 ActiveModule::DoCycle() {
     }
 
     // check if ship has sufficient capacitor capacity - if not, abort the cycle
-    if (m_modRef->HasAttribute(AttrCapacitorNeed)) {
+    float requiredCapacitorCharge = 0.f;
+    bool needsCapDrain = false;
+    if (m_modRef->groupID() == EVEDB::invGroups::Jump_Portal_Generator && m_modRef->HasAttribute(AttrJumpPortalCapacitorNeed)) {
+        requiredCapacitorCharge = GetAttribute(AttrJumpPortalCapacitorNeed).get_float();
+        needsCapDrain = true;
+    } else if (m_modRef->HasAttribute(AttrCapacitorNeed)) {
+        requiredCapacitorCharge = GetAttribute(AttrCapacitorNeed).get_float();
+        needsCapDrain = true;
+    }
+
+    if (needsCapDrain) {
         float remainingCapacitorCharge = m_shipRef->GetAttribute(AttrCapacitorCharge).get_float();
-        float requiredCapacitorCharge = GetAttribute(AttrCapacitorNeed).get_float();
 
         float newCap = remainingCapacitorCharge - requiredCapacitorCharge;
 

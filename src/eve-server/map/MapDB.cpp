@@ -245,7 +245,7 @@ PyRep *MapDB::GetDynamicData(uint8 type, uint8 time) {
             sDatabase.RunQuery(res, "SELECT solarSystemID, jumpsHour AS value1 FROM mapDynamicData" );
         } break;
         case 2: {
-            // cynos arent implemented yet, so this will always return 0
+            // moduleCnt / structureCnt updated when ship cyno fields and POS cyno structures change
             sDatabase.RunQuery(res, "SELECT solarSystemID, moduleCnt, structureCnt FROM mapDynamicData WHERE active=1" );
             DBResultRow row;
             PyDict* dict = new PyDict();
@@ -358,4 +358,36 @@ void MapDB::AddPodKill(uint32 sysID) {
 void MapDB::ManipulateTimeData()
 {
 
+}
+
+void MapDB::AdjustCynoModuleCount(uint32 solarSystemID, int delta)
+{
+    if (delta == 0 || solarSystemID == 0)
+        return;
+    DBerror err;
+    const uint32 absDelta = delta > 0 ? (uint32)delta : (uint32)(-delta);
+    if (delta > 0)
+        sDatabase.RunQuery(err,
+            "UPDATE mapDynamicData SET moduleCnt = moduleCnt + %u WHERE solarSystemID = %u",
+            absDelta, solarSystemID);
+    else
+        sDatabase.RunQuery(err,
+            "UPDATE mapDynamicData SET moduleCnt = CASE WHEN moduleCnt >= %u THEN moduleCnt - %u ELSE 0 END WHERE solarSystemID = %u",
+            absDelta, absDelta, solarSystemID);
+}
+
+void MapDB::AdjustCynoStructureCount(uint32 solarSystemID, int delta)
+{
+    if (delta == 0 || solarSystemID == 0)
+        return;
+    DBerror err;
+    const uint32 absDelta = delta > 0 ? (uint32)delta : (uint32)(-delta);
+    if (delta > 0)
+        sDatabase.RunQuery(err,
+            "UPDATE mapDynamicData SET structureCnt = structureCnt + %u WHERE solarSystemID = %u",
+            absDelta, solarSystemID);
+    else
+        sDatabase.RunQuery(err,
+            "UPDATE mapDynamicData SET structureCnt = CASE WHEN structureCnt >= %u THEN structureCnt - %u ELSE 0 END WHERE solarSystemID = %u",
+            absDelta, absDelta, solarSystemID);
 }

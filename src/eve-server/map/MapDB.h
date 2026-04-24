@@ -69,6 +69,12 @@ public:
     static void UpdateJumps(uint32 sysID, uint16 jumps);    //jumpsHour
     static void UpdateKillData(uint32 sysID, SystemKillData& data);    // ship, faction, pod
     static void UpdatePilotCount(uint32 sysID, uint16 docked=0, uint16 space=0); /**pilotsDocked, pilotsInSpace */
+
+    /** Delta-apply ship cyno beacon count for star map dynamic data (mapDynamicData.moduleCnt). */
+    static void AdjustCynoModuleCount(uint32 solarSystemID, int delta);
+
+    /** POS cyno generator arrays etc. (mapDynamicData.structureCnt). */
+    static void AdjustCynoStructureCount(uint32 solarSystemID, int delta);
 };
 
 #endif

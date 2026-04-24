@@ -111,8 +111,11 @@ public:
     AnomalyMgr* GetAnomMgr()                            { return m_anomMgr; }
     DungeonMgr* GetDungMgr()                            { return m_dungMgr; }
 
-    // range is 0.1 for 1.0 system to 2.0 for -0.9 system
+    // Internal sec metric: m_secValue = 1.1f - mapSolarSystems.security (see ctor). NOT comparable to UI 0.5 high-sec directly.
+    // range is 0.1 for 1.0 system to ~2.0 for null/low sec
     float GetSecValue()                                 { return m_secValue; }
+    /** Same number the client shows (e.g. 0.4). Use this for high-sec rules (≥0.5), not GetSecValue(). */
+    float GetMapSecurityStatus() const                  { return 1.1f - m_secValue; }
 
     // this create a SE with given data and add to system
     bool BuildDynamicEntity(const DBSystemDynamicEntity& entity, uint32 launcherID=0);

@@ -20,6 +20,28 @@
 #include "packets/Fleet.h"
 #include "fleet/FleetData.h"
 
+#include <unordered_map>
+
+/** Active ship-lit cyno beacon for fleet UI / jump portals (not persisted). */
+struct FleetBeaconEntry {
+    uint32 beaconItemID {0};
+    uint32 solarSystemID {0};
+    bool covert {false};
+};
+
+/** Active titan / Black Ops jump portal bridge session. */
+struct FleetBridgeEntry {
+    uint32 bridgeShipID {0};
+    uint32 beaconItemID {0};
+    uint32 solarSystemID {0};
+    bool covert {false};
+    double remainingMassKg {0};
+    /** Per-jump cost multiplier (from module AttrJumpPortalConsumptionMassFactor). */
+    double massCostFactor {1.0};
+    /** Expiry from utils_time GetSteadyTime() (milliseconds). */
+    int64 expirySteadyMs {0};
+};
+
 class FleetService
 : public Singleton<FleetService>
 {
@@ -122,6 +144,20 @@ public:
      */
     bool GetFleetWarpTargets(Client* issuer, std::vector<Client*>& out);
 
+    void RegisterActiveBeacon(uint32 charID, uint32 beaconItemID, uint32 solarSystemID, bool covert);
+    void UnregisterActiveBeacon(uint32 charID);
+    bool GetActiveBeaconForChar(uint32 charID, FleetBeaconEntry& out) const;
+
+    /** First matching beacon held by any member of the fleet (same covert flag). */
+    bool FindCompatibleFleetBeacon(uint32 fleetID, bool requireCovert, FleetBeaconEntry& out) const;
+
+    void RegisterJumpPortal(uint32 bridgeShipID, uint32 beaconItemID, uint32 solarSystemID,
+                            bool covert, double totalMassKg, double massCostFactor, int64 expirySteadyMs);
+    void UnregisterJumpPortal(uint32 bridgeShipID);
+    bool GetActiveBridgeForShip(uint32 bridgeShipID, FleetBridgeEntry& out) const;
+    bool ConsumeJumpPortalMass(uint32 bridgeShipID, double shipMassKg);
+    void InvalidateBridgesToBeacon(uint32 beaconItemID);
+
 protected:
     void RemoveMember(Client* pClient);
 
@@ -151,6 +187,9 @@ private:
     std::multimap<uint32, Client*>      m_fleetMembers;     // fleetID/Client*
     std::multimap<uint32, uint32>       m_fleetWings;       // fleetID/wingIDs
     std::multimap<uint32, uint32>       m_wingSquads;       // wingID/squadIDs
+
+    std::unordered_map<uint32, FleetBeaconEntry> m_activeBeaconByChar;
+    std::unordered_map<uint32, FleetBridgeEntry> m_activeBridgeByShip;
 };
 
 //Singleton
