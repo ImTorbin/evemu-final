@@ -1,18 +1,14 @@
 
-use evemu;   -- set this to your db name
--- seeds specified regionID
--- some region ids found in seed_data.sql
+use evemu;   -- set this to your DB name
+-- Hub-only default seeding to preserve trade incentives.
+-- Regional depth should be handled by MarketBot (sprinkle).
 
-set @regionid=10000001;
-set @saturation=0.8; -- fuzzy logic.  % of stations to fill with orders (random selection)
-
--- select stations to fill
 create temporary table if not exists tStations (stationId int, solarSystemID int, regionID int, corporationID int, security float);
 truncate table tStations;
-select round(count(stationID)*@saturation) into @lim from staStations where regionID=@regionid ;
-set @i=0;
 insert into tStations
-  select stationID,solarSystemID,regionID, corporationID, security from staStations where (@i:=@i+1)<=@lim AND regionID=@regionid  order by rand();
+  select stationID, solarSystemID, regionID, corporationID, security
+  from staStations
+  where stationID in (60003760, 60011866, 60008494, 60005686);
 
 -- actual seeding
 INSERT INTO mktOrders (typeID, ownerID, regionID, stationID, price, volEntered, volRemaining, issued,
