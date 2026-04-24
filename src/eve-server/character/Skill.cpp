@@ -26,7 +26,7 @@ Rewrite:    Allan
 
 #include "eve-server.h"
 
-#include <algorithm>
+#include <cstdint>
 
 #include "character/Character.h"
 #include "character/Skill.h"
@@ -98,8 +98,8 @@ uint32 Skill::GetCurrentSP(Character* ch, int64 startTime/*0*/)
     /* Per-second SP (SPMin is points per minute). Avoid whole-minute steps so the client
      * bar does not outrun the scheduled endTime / show "imminent" while minutes remain. */
     uint32 timeElapsed((GetFileTimeNow() - startTime) / EvE::Time::Second);
-    const uint64 delta64 = ((uint64)timeElapsed * (uint64)ch->GetSPPerMin(this)) / 60ULL;
-    const uint32 delta = static_cast<uint32>(std::min(delta64, (uint64)0xFFFFFFFFULL));
+    const uint64_t spGain = (static_cast<uint64_t>(timeElapsed) * static_cast<uint64_t>(ch->GetSPPerMin(this))) / 60ULL;
+    const uint32 delta = (spGain > 0xFFFFFFFFu) ? 0xFFFFFFFFu : static_cast<uint32_t>(spGain);
     currentSP += delta;
 
     uint32 nextSP = GetSPForLevel(level);
