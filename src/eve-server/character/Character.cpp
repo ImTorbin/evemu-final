@@ -287,6 +287,7 @@ bool Character::_Load() {
             sRef->SetFlag(flagSkillInTraining, false);
             m_inTraining = sRef.get();
         }
+        ResyncSkillQueueTimers();
     } else {
         ClearSkillFlags();
     }
@@ -999,6 +1000,19 @@ void Character::UpdateSkillQueue() {
     // complete revamp and rename, this kept for notes  -allan 12Oct20
 }
 
+void Character::ResyncSkillQueueTimers()
+{
+    if (m_skillQueue.empty())
+        return;
+    QueuedSkill& qs = m_skillQueue.front();
+    Skill* sk = GetCharSkillRef(qs.typeID).get();
+    if (sk == nullptr)
+        return;
+    uint32 curSP = sk->GetCurrentSP(this, qs.startTime);
+    uint32 nextSP = sk->GetSPForLevel(qs.level);
+    qs.endTime = EvEMath::Skill::EndTime(curSP, nextSP, GetSPPerMin(sk), GetFileTimeNow());
+}
+
 void Character::SkillQueueLoop(bool update/*true*/)
 {
     double begin(GetTimeMSeconds());
@@ -1014,8 +1028,13 @@ void Character::SkillQueueLoop(bool update/*true*/)
 
     // at this point, there is a skill in training, and it is front of queue
     int64 curTime(GetFileTimeNow());
-    if (m_skillQueue.front().endTime > curTime) {
-        float timeLeft = (m_skillQueue.front().endTime - curTime) / EvE::Time::Second;
+    QueuedSkill& qsFront = m_skillQueue.front();
+    uint32 tgtSP = m_inTraining->GetSPForLevel(qsFront.level);
+    uint32 liveSP = m_inTraining->GetCurrentSP(this, qsFront.startTime);
+    const bool timeRemaining = (qsFront.endTime > curTime);
+    const bool spRemaining = (liveSP < tgtSP);
+    if (timeRemaining && spRemaining) {
+        float timeLeft = (qsFront.endTime - curTime) / EvE::Time::Second;
         const char* formatedTime = EvE::FormatTime(timeLeft);
         _log(SKILL__INFO, "%s still training.  %s remaining.", m_inTraining->name(), formatedTime);
         UpdateSkillQueueEndTime();
@@ -1047,8 +1066,10 @@ void Character::SkillQueueLoop(bool update/*true*/)
             continue;
         }
 
-        if (qs.endTime < curTime) {
-            //  skill training has completed.
+        uint32 goalSP = skill->GetSPForLevel(qs.level);
+        uint32 haveSP = skill->GetCurrentSP(this, qs.startTime);
+        if ((qs.endTime < curTime) || (haveSP >= goalSP)) {
+            //  skill training has completed (time reached or SP reached — avoids "imminent" vs wall-clock skew).
             uint32 currentSP = skill->GetSPForLevel(qs.level);
             SaveSkillHistory(EvESkill::Event::QueueTrainingCompleted, qs.endTime, m_itemID, skill->typeID(), qs.level, currentSP);
 

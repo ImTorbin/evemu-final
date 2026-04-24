@@ -452,6 +452,9 @@ private:
 
     uint32 m_loginTime;
 
+    /// Recompute front skill endTime from live SP/min (fixes stale DB after rate changes).
+    void            ResyncSkillQueueTimers();
+
     std::map<uint8, InventoryItemRef>  m_implantMap;    // slotID/itemRef
 };
 

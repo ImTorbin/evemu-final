@@ -26,6 +26,8 @@ Rewrite:    Allan
 
 #include "eve-server.h"
 
+#include <algorithm>
+
 #include "character/Character.h"
 #include "character/Skill.h"
 #include "inventory/AttributeEnum.h"
@@ -93,13 +95,16 @@ uint32 Skill::GetCurrentSP(Character* ch, int64 startTime/*0*/)
     if (level > EvESkill::MAXSKILLLEVEL)
         level = EvESkill::MAXSKILLLEVEL;
 
-    /** @todo this isnt completely right.... */
-    // at this point, the skill is in training.  calculate accumulated sp and return
-    uint32 delta(0);
+    /* Per-second SP (SPMin is points per minute). Avoid whole-minute steps so the client
+     * bar does not outrun the scheduled endTime / show "imminent" while minutes remain. */
     uint32 timeElapsed((GetFileTimeNow() - startTime) / EvE::Time::Second);
-    // skill in training - return updated SP based on elapsed training
-    delta = (timeElapsed / 60) * ch->GetSPPerMin(this);
+    const uint64 delta64 = ((uint64)timeElapsed * (uint64)ch->GetSPPerMin(this)) / 60ULL;
+    const uint32 delta = static_cast<uint32>(std::min(delta64, (uint64)0xFFFFFFFFULL));
     currentSP += delta;
+
+    uint32 nextSP = GetSPForLevel(level);
+    if (currentSP > nextSP)
+        currentSP = nextSP;
 
     _log(SKILL__TRACE, "Skill::GetCurrentSP() for %s is %u - delta: %u, elapsed time: %us", \
             name(), currentSP, delta, timeElapsed);

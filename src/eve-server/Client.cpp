@@ -584,26 +584,44 @@ void Client::UpdateBubble() {
         SetDestiny(NULL_ORIGIN);
     }
 
-    if (GetShipSE()->SysBubble() == nullptr) {
+    ShipSE* ship = GetShipSE();
+
+    // Must be in a system bubble before SendSetState(); otherwise DestinyManager
+    // aborts and the client stays on a black screen (no ballpark / set-state).
+    if (ship->SysBubble() == nullptr)
         EnterSystem(GetSystemID());
+    if (ship->SysBubble() == nullptr && m_system != nullptr)
+        m_system->AddEntity(ship);
+    if (ship->SysBubble() == nullptr)
+        sBubbleMgr.Add(ship);
+    // BubbleManager nudges zero positions; mirror that if we still have no bubble
+    // (fresh DB / bad coords / entity already in SystemManager so AddEntity noop'd).
+    if (ship->SysBubble() == nullptr && m_system != nullptr) {
+        if (ship->GetPosition().isZero()) {
+            ship->DestinyMgr()->SetPosition(sMapData.GetRandPointOnPlanet(m_system->GetID()), true);
+        } else {
+            _log(CLIENT__ERROR, "UpdateBubble: %s(%u) still has no bubble with non-zero pos — retrying BubbleMgr.Add.",
+                GetName(), m_char.get() ? m_char->itemID() : 0u);
+        }
+        sBubbleMgr.Add(ship);
     }
 
-    // Clear any stale velocity / mode before an authoritative position snap (login
-    // rebubble, GM tools). SetPosition alone does not zero m_velocity; leftover
-    // warp or align state produced observer/pilot velocity bundles with snaps.
-    GetShipSE()->DestinyMgr()->Halt();
-    GetShipSE()->DestinyMgr()->SetPosition(GetShipSE()->GetPosition(), true);
+    // Clear stale velocity after we know the ship is on-grid; Halt before a valid
+    // bubble could leave SendSetState() unsent and the client black.
+    ship->DestinyMgr()->Halt();
+    ship->DestinyMgr()->SetPosition(ship->GetPosition(), true);
 
-    SystemBubble *pBubble = GetShipSE()->SysBubble();
+    SystemBubble* pBubble = ship->SysBubble();
     if (pBubble == nullptr) {
-        sBubbleMgr.Add(GetShipSE());
-        pBubble = GetShipSE()->SysBubble();
+        sLog.Error("Client::UpdateBubble", "%s: cannot resolve a system bubble — import map/static data and check character position. SendSetState skipped.",
+            GetName());
+        return;
     }
 
-    pBubble->SendAddBalls(GetShipSE());
+    pBubble->SendAddBalls(ship);
 
     SetStateSent(false);
-    GetShipSE()->DestinyMgr()->SendSetState();
+    ship->DestinyMgr()->SendSetState();
     // SetSessionTimer(); // TODO: leaving here for reference, but probably isn't needed in the future
 }
 

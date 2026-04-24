@@ -47,7 +47,13 @@ int64 EvEMath::Skill::EndTime(uint32 currentSP, uint32 nextSP, uint16 SPMin, int
 {
     if (currentSP >= nextSP)
         return 0;
-    return ((((nextSP - currentSP) / SPMin) * EvE::Time::Minute) + timeNow);
+    if (SPMin == 0)
+        return timeNow;
+    /* Integer division truncated training time vs GetCurrentSP(), which advances SP every
+     * second — UI hit "done" early while wall-clock endTime lagged ("completion imminent"). */
+    uint32 need = nextSP - currentSP;
+    uint32 mins = (need + SPMin - 1) / SPMin;
+    return (((int64)mins) * EvE::Time::Minute) + timeNow;
 }
 
 
