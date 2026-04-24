@@ -39,7 +39,10 @@ LookupService::LookupService() :
     this->Add("LookupFactions", &LookupService::LookupFactions);
     this->Add("LookupCorporationTickers", &LookupService::LookupCorporationTickers);
     this->Add("LookupStations", &LookupService::LookupStations);
-    this->Add("LookupKnownLocationsByGroup", &LookupService::LookupKnownLocationsByGroup);
+    this->Add("LookupKnownLocationsByGroup", static_cast<PyResult (LookupService::*)(PyCallArgs&, PyWString*, PyInt*)>(&LookupService::LookupKnownLocationsByGroup));
+    this->Add("LookupKnownLocationsByGroup", static_cast<PyResult (LookupService::*)(PyCallArgs&, PyString*, PyInt*)>(&LookupService::LookupKnownLocationsByGroup));
+    this->Add("LookupKnownLocationsByGroup", static_cast<PyResult (LookupService::*)(PyCallArgs&, PyInt*, PyWString*)>(&LookupService::LookupKnownLocationsByGroup));
+    this->Add("LookupKnownLocationsByGroup", static_cast<PyResult (LookupService::*)(PyCallArgs&, PyInt*, PyString*)>(&LookupService::LookupKnownLocationsByGroup));
     this->Add("LookupEvePlayerCharacters", &LookupService::LookupEvePlayerCharacters);
     this->Add("LookupPCOwners", &LookupService::LookupPCOwners);
     this->Add("LookupNoneNPCAccountOwners", &LookupService::LookupNoneNPCAccountOwners);
@@ -83,5 +86,17 @@ PyResult LookupService::LookupStations(PyCallArgs &call, PyWString* searchString
 }
 
 PyResult LookupService::LookupKnownLocationsByGroup(PyCallArgs &call, PyWString* searchString, PyInt* exact) {
+    return ServiceDB::LookupKnownLocationsByGroup(searchString->content().c_str(), exact->value() ? true : false);
+}
+
+PyResult LookupService::LookupKnownLocationsByGroup(PyCallArgs &call, PyString* searchString, PyInt* exact) {
+    return ServiceDB::LookupKnownLocationsByGroup(searchString->content().c_str(), exact->value() ? true : false);
+}
+
+PyResult LookupService::LookupKnownLocationsByGroup(PyCallArgs &call, PyInt* exact, PyWString* searchString) {
+    return ServiceDB::LookupKnownLocationsByGroup(searchString->content().c_str(), exact->value() ? true : false);
+}
+
+PyResult LookupService::LookupKnownLocationsByGroup(PyCallArgs &call, PyInt* exact, PyString* searchString) {
     return ServiceDB::LookupKnownLocationsByGroup(searchString->content().c_str(), exact->value() ? true : false);
 }
