@@ -64,7 +64,8 @@ public:
     static PyRep* LookupFactions(const std::string &);
     static PyRep* LookupCorporationTickers(const std::string &);
     static PyRep* LookupStations(const std::string &);
-    static PyRep* LookupKnownLocationsByGroup(const std::string &, uint32);
+    /** @param groupID invGroups location group (Region, Constellation, Solar_System, Station, …) */
+    static PyRep* LookupKnownLocationsByGroup(const std::string &search, uint32 groupID);
 
     static PyRep* PrimeOwners(std::vector<int32>& itemIDs);
 

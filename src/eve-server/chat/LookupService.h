@@ -47,10 +47,10 @@ protected:
     PyResult LookupFactions(PyCallArgs& call, PyWString* searchString);
     PyResult LookupCorporationTickers(PyCallArgs& call, PyWString* searchString);
     PyResult LookupStations(PyCallArgs& call, PyWString* searchString);
-    PyResult LookupKnownLocationsByGroup(PyCallArgs& call, PyWString* searchString, PyInt* exact);
-    PyResult LookupKnownLocationsByGroup(PyCallArgs& call, PyString* searchString, PyInt* exact);
-    PyResult LookupKnownLocationsByGroup(PyCallArgs& call, PyInt* exact, PyWString* searchString);
-    PyResult LookupKnownLocationsByGroup(PyCallArgs& call, PyInt* exact, PyString* searchString);
+    PyResult LookupKnownLocationsByGroup(PyCallArgs& call, PyWString* searchString, PyInt* groupID);
+    PyResult LookupKnownLocationsByGroup(PyCallArgs& call, PyString* searchString, PyInt* groupID);
+    PyResult LookupKnownLocationsByGroup(PyCallArgs& call, PyInt* groupID, PyWString* searchString);
+    PyResult LookupKnownLocationsByGroup(PyCallArgs& call, PyInt* groupID, PyString* searchString);
 };
 
 

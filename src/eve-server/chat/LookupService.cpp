@@ -85,18 +85,18 @@ PyResult LookupService::LookupStations(PyCallArgs &call, PyWString* searchString
     return ServiceDB::LookupStations(searchString->content().c_str());
 }
 
-PyResult LookupService::LookupKnownLocationsByGroup(PyCallArgs &call, PyWString* searchString, PyInt* exact) {
-    return ServiceDB::LookupKnownLocationsByGroup(searchString->content().c_str(), exact->value() ? true : false);
+PyResult LookupService::LookupKnownLocationsByGroup(PyCallArgs &call, PyWString* searchString, PyInt* groupID) {
+    return ServiceDB::LookupKnownLocationsByGroup(searchString->content().c_str(), groupID->value());
 }
 
-PyResult LookupService::LookupKnownLocationsByGroup(PyCallArgs &call, PyString* searchString, PyInt* exact) {
-    return ServiceDB::LookupKnownLocationsByGroup(searchString->content().c_str(), exact->value() ? true : false);
+PyResult LookupService::LookupKnownLocationsByGroup(PyCallArgs &call, PyString* searchString, PyInt* groupID) {
+    return ServiceDB::LookupKnownLocationsByGroup(searchString->content().c_str(), groupID->value());
 }
 
-PyResult LookupService::LookupKnownLocationsByGroup(PyCallArgs &call, PyInt* exact, PyWString* searchString) {
-    return ServiceDB::LookupKnownLocationsByGroup(searchString->content().c_str(), exact->value() ? true : false);
+PyResult LookupService::LookupKnownLocationsByGroup(PyCallArgs &call, PyInt* groupID, PyWString* searchString) {
+    return ServiceDB::LookupKnownLocationsByGroup(searchString->content().c_str(), groupID->value());
 }
 
-PyResult LookupService::LookupKnownLocationsByGroup(PyCallArgs &call, PyInt* exact, PyString* searchString) {
-    return ServiceDB::LookupKnownLocationsByGroup(searchString->content().c_str(), exact->value() ? true : false);
+PyResult LookupService::LookupKnownLocationsByGroup(PyCallArgs &call, PyInt* groupID, PyString* searchString) {
+    return ServiceDB::LookupKnownLocationsByGroup(searchString->content().c_str(), groupID->value());
 }

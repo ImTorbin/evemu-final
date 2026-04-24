@@ -491,20 +491,73 @@ PyRep* ServiceDB::LookupStations(const std::string & search) {
     return DBResultToRowset(res);
 }
 
-//  wtf is this shit?
-PyRep* ServiceDB::LookupKnownLocationsByGroup(const std::string & search, uint32 typeID) {
+PyRep* ServiceDB::LookupKnownLocationsByGroup(const std::string & search, uint32 groupID) {
+    /* Client passes invGroups-style location group (e.g. Solar_System = 5), not a bool "exact"
+     * and not an inventory typeID. Match names by prefix (client: "beginning of its name"). */
     DBQueryResult res;
+    if (search.empty()) {
+        if (!sDatabase.RunQuery(res,
+                "SELECT solarSystemID AS itemID, solarSystemName AS itemName, %u AS typeID "
+                " FROM mapSolarSystems WHERE 1=0",
+                (unsigned)EVEDB::invGroups::Solar_System))
+            return nullptr;
+        return DBResultToRowset(res);
+    }
+
     std::string secure;
     sDatabase.DoEscapeString(secure, search);
 
-    if (!sDatabase.RunQuery(res,
-        "SELECT"
-        "   itemID, itemName, typeID "
-        " FROM entity "
-        " WHERE itemName LIKE '%s' AND typeID = %u", secure.c_str(), typeID))
-    {
-        _log(DATABASE__ERROR, "Error in query: %s", res.error.c_str());
-        return 0;
+    bool ok = false;
+    switch (groupID) {
+        case EVEDB::invGroups::Region:
+            ok = sDatabase.RunQuery(res,
+                "SELECT"
+                "   regionID AS itemID, regionName AS itemName, %u AS typeID "
+                " FROM mapRegions"
+                " WHERE regionName LIKE '%s%%'"
+                " LIMIT 50",
+                (unsigned)EVEDB::invGroups::Region, secure.c_str());
+            break;
+        case EVEDB::invGroups::Constellation:
+            ok = sDatabase.RunQuery(res,
+                "SELECT"
+                "   constellationID AS itemID, constellationName AS itemName, %u AS typeID "
+                " FROM mapConstellations"
+                " WHERE constellationName LIKE '%s%%'"
+                " LIMIT 50",
+                (unsigned)EVEDB::invGroups::Constellation, secure.c_str());
+            break;
+        case EVEDB::invGroups::Solar_System:
+            ok = sDatabase.RunQuery(res,
+                "SELECT"
+                "   solarSystemID AS itemID, solarSystemName AS itemName, %u AS typeID "
+                " FROM mapSolarSystems"
+                " WHERE solarSystemName LIKE '%s%%'"
+                " LIMIT 50",
+                (unsigned)EVEDB::invGroups::Solar_System, secure.c_str());
+            break;
+        case EVEDB::invGroups::Station:
+            ok = sDatabase.RunQuery(res,
+                "SELECT"
+                "   stationID AS itemID, stationName AS itemName, stationTypeID AS typeID "
+                " FROM staStations"
+                " WHERE stationName LIKE '%s%%'"
+                " LIMIT 50",
+                secure.c_str());
+            break;
+        default:
+            _log(DATA__WARNING, "LookupKnownLocationsByGroup: unsupported groupID %u", groupID);
+            ok = sDatabase.RunQuery(res,
+                "SELECT"
+                "   solarSystemID AS itemID, solarSystemName AS itemName, %u AS typeID "
+                " FROM mapSolarSystems WHERE 1=0",
+                (unsigned)EVEDB::invGroups::Solar_System);
+            break;
+    }
+
+    if (!ok) {
+        _log(DATABASE__ERROR, "LookupKnownLocationsByGroup failed: %s", res.error.c_str());
+        return nullptr;
     }
 
     return DBResultToRowset(res);
