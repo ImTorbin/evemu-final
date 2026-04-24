@@ -1693,13 +1693,24 @@ PyRep* CharacterDB::GetBounty(uint32 charID, uint32 ownerID) {
 
 PyRep* CharacterDB::GetTopBounties() {
     DBQueryResult res;
-    sDatabase.RunQuery(res,
+    if (!sDatabase.RunQuery(res,
                        "SELECT c.characterID, c.bounty, c.online, o.characterName AS ownerName"
                        " FROM webBounties AS b"
                        " LEFT JOIN chrCharacters AS c ON c.characterID = b.characterID"
                        " LEFT JOIN chrCharacters AS o ON o.characterID = b.ownerID"
                        " ORDER BY c.bounty DESC"
-                       " LIMIT 10");    /** @todo config variable? */
+                       " LIMIT 10")) {    /** @todo config variable? */
+        codelog(CHARACTER__ERROR, "GetTopBounties primary query failed: %s. Falling back to chrCharacters bounty list.", res.error.c_str());
+        if (!sDatabase.RunQuery(res,
+            "SELECT c.characterID, c.bounty, c.online, '' AS ownerName"
+            " FROM chrCharacters AS c"
+            " WHERE c.bounty > 0"
+            " ORDER BY c.bounty DESC"
+            " LIMIT 10")) {
+            codelog(CHARACTER__ERROR, "GetTopBounties fallback query failed: %s", res.error.c_str());
+            return new PyObject("util.Rowset", new PyList());
+        }
+    }
     return DBResultToRowset(res);
 }
 
