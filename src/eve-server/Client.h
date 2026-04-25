@@ -448,6 +448,13 @@ public:
     void SendNotification(const char *notifyType, const char *idType, PyTuple *payload, bool seq=true);
     void SendNotification(const char *notifyType, const char *idType, PyTuple **payload, bool seq=true);
 
+    // Phase 0 proof for the server->client LiveUpdate pipeline. Sends an
+    // OnLiveClientUpdate notification carrying a deliberately-invalid
+    // payload so the client's liveUpdateSvc logs an "Applying live update"
+    // line before marshal.loads fails. Seeing that line in LogServer
+    // confirms the notification dispatcher round-trips correctly.
+    void SendLiveUpdatePing(const char* tag);
+
     // this is to check Throw status, to avoid throws/segfault when not applicable  (should use try/catch block)
     bool CanThrow()                                     { return m_canThrow; }
 

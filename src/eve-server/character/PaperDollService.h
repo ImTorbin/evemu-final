@@ -51,6 +51,7 @@ protected:
     PyResult UpdateExistingCharacterLimited(PyCallArgs& call, PyInt* characterID, PyRep* dollData, PyRep* portraitInfo, PyBool* dollExists);
     PyResult GetPaperDollPortraitDataFor(PyCallArgs& call, PyInt* characterID);
     PyResult GetMyPaperDollData(PyCallArgs& call, PyInt* characterID);
+    PyResult GetPaperDollDataFor(PyCallArgs& call, PyInt* characterID);
 
 private:
 	PaperDollDB m_db;

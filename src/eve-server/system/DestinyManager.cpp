@@ -657,6 +657,10 @@ void DestinyManager::Eject()
 //  check for collision.  called by Move()
 void DestinyManager::CheckBump()
 {
+    if (sConfig.cosmic.NoPlayerCollision) {
+        return;
+    }
+
     double profileStartTime(GetTimeUSeconds());
 
     //  collision detection code here
@@ -676,6 +680,8 @@ void DestinyManager::CheckBump()
     float distance = 0.0f;
     for (auto cur : vPlayers) {
         if (cur == pClient)
+            continue;
+        if (!cur->IsInSpace() || (cur->GetShipSE() == nullptr))
             continue;
         distance = pos.distance(cur->GetShipSE()->GetPosition());
         distance -= (mySE->GetRadius() - cur->GetShipSE()->GetRadius());

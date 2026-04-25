@@ -33,6 +33,7 @@ PaperDollService::PaperDollService() :
 {
     this->Add("GetPaperDollData", &PaperDollService::GetPaperDollData);
     this->Add("GetMyPaperDollData", &PaperDollService::GetMyPaperDollData);
+    this->Add("GetPaperDollDataFor", &PaperDollService::GetPaperDollDataFor);
     this->Add("ConvertAndSavePaperDoll", &PaperDollService::ConvertAndSavePaperDoll);
     this->Add("GetPaperDollPortraitDataFor", &PaperDollService::GetPaperDollPortraitDataFor);
     this->Add("UpdateExistingCharacterFull", &PaperDollService::UpdateExistingCharacterFull);
@@ -105,6 +106,31 @@ PyResult PaperDollService::GetMyPaperDollData(PyCallArgs &call, PyInt* character
 	args->SetItemString( "modifiers", m_db.GetPaperDollAvatarModifiers(call.client->GetCharacterID()) );
 	args->SetItemString( "appearance", m_db.GetPaperDollAvatar(call.client->GetCharacterID()) );
 	args->SetItemString( "sculpts", m_db.GetPaperDollAvatarSculpts(call.client->GetCharacterID()) );
+
+    return new PyObject("util.KeyVal", args);
+}
+
+// Same shape as GetMyPaperDollData but keyed on the requested characterID.
+// Used by the modded shared-CQ client to materialize remote avatars in one
+// RPC instead of N legacy GetPaperDollData / GetPaperDollPortraitDataFor
+// round trips per remote occupant.
+PyResult PaperDollService::GetPaperDollDataFor(PyCallArgs &call, PyInt* characterID)
+{
+    call.Dump(PLAYER__CALL_DUMP);
+
+    if (characterID == nullptr) {
+        sLog.Error("PaperDoll", "[PaperDoll] GetPaperDollDataFor: null characterID arg from char=%u",
+            call.client != nullptr ? call.client->GetCharacterID() : 0u);
+        return PyStatic.NewNone();
+    }
+
+    const uint32 charID = static_cast<uint32>(characterID->value());
+
+    PyDict* args = new PyDict;
+    args->SetItemString("colors",     m_db.GetPaperDollAvatarColors(charID));
+    args->SetItemString("modifiers",  m_db.GetPaperDollAvatarModifiers(charID));
+    args->SetItemString("appearance", m_db.GetPaperDollAvatar(charID));
+    args->SetItemString("sculpts",    m_db.GetPaperDollAvatarSculpts(charID));
 
     return new PyObject("util.KeyVal", args);
 }

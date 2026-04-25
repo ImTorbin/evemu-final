@@ -146,7 +146,7 @@ boolean can use either 0/1 OR true/false.
         <startAurBalance>600.0</startAurBalance>
         <startStation>0</startStation><!-- stationID of character starting station.  '0' to use default based on race -->
         <startSecRating>1.0</startSecRating>
-        <startCorporation>01069536620</startCorporation><!-- corporationID for new characters '0' to use default based on school -->
+        <startCorporation>0</startCorporation><!-- corporationID for new characters '0' to use default based on school -->
         <terminationDelay>1800</terminationDelay> <!-- seconds  30m default -->
         <statMultiplier>1</statMultiplier><!-- stats are multiplied by this (after remap) -->
         <allow3edChar>false</allow3edChar><!-- (dis)allow creating a third character -->
@@ -211,6 +211,7 @@ boolean can use either 0/1 OR true/false.
         <WormHoleEnabled>true</WormHoleEnabled><!-- bool -->
         <CiviliansEnabled>false</CiviliansEnabled><!-- bool -->
         <BumpEnabled>false</BumpEnabled><!-- bool -->
+        <NoPlayerCollision>true</NoPlayerCollision><!-- bool -->
     </cosmic>
 
     <exploring><!--  control amount of specific sites per system (adjusted by truSec) -->
@@ -225,6 +226,7 @@ boolean can use either 0/1 OR true/false.
     <testing><!-- switches for various incomplete/testing code sections -->
         <ShipHeat>false</ShipHeat><!-- bool -->
         <EnableDrones>true</EnableDrones><!-- bool -->
+        <EnableSharedCaptainsQuarters>true</EnableSharedCaptainsQuarters><!-- bool -->
     </testing>
 
     <debug><!-- switches for various server methods -->

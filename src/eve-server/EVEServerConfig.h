@@ -271,6 +271,7 @@ public:
         bool WormHoleEnabled;
         bool CiviliansEnabled;
         bool BumpEnabled;
+        bool NoPlayerCollision;
         uint8 BeltRespawn;
         uint8 BeltGrowth;
         float roidRadiusMultiplier;
@@ -328,6 +329,7 @@ public:
     struct {
         bool ShipHeat;
         bool EnableDrones;
+        bool EnableSharedCaptainsQuarters;
     } testing;
 
     // From <debug>

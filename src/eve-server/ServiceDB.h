@@ -55,6 +55,9 @@ public:
     static void SetAccountOnlineStatus(uint32 accountID, bool online=false);
     static void SetAccountBanStatus(uint32 accountID, bool banned=false);
     static void SaveServerStats(double threads, float rss, float vm, float user, float kernel, uint32 items, uint32 bubbles);
+    static uint32 GetOrCreateCQWorldSpace(uint32 stationID);
+    static void SetCQOccupancy(uint32 worldSpaceID, uint32 characterID, bool inWorldspace);
+    static uint32 GetSceneIDForStation(uint32 stationID);
 
     static uint32 SetClientSeed();
 

@@ -1,35 +1,51 @@
 #!/bin/bash
+set -euo pipefail
 
 echo "Downloading latest EVEDBTool..."
 
-# Check if curl is available or not
-if ! command -v curl &> /dev/null
-then
-    echo "Wget or curl not found, please install one of these."
-    exit
+if ! command -v curl >/dev/null 2>&1; then
+    echo "curl is required but was not found."
+    exit 1
 fi
 
-arch=$(arch)
+ARCH="$(uname -m)"
+API_URL="https://api.github.com/repos/EvEmu-Project/EVEDBTool/releases/latest"
 
-if [[ $arch == aarch64* ]];
-then
-echo "Using aarch64 build..."
-# Download with curl
-DOWNLOAD_URL=$(curl -s https://api.github.com/repos/EvEmu-Project/EVEDBTool/releases/latest \
-        | grep browser_download_url \
-        | grep evedb_aarch64 \
-        | cut -d '"' -f 4)
+case "$ARCH" in
+    aarch64|arm64)
+        echo "Using aarch64 build..."
+        ASSET_FILTER='evedb_aarch64'
+        ;;
+    x86_64|amd64)
+        echo "Using x86_64 build..."
+        ASSET_FILTER='evedbtool'
+        ;;
+    *)
+        echo "Unsupported architecture: $ARCH"
+        exit 1
+        ;;
+esac
+
+DOWNLOAD_URL="$(curl -fsSL "$API_URL" \
+    | grep browser_download_url \
+    | grep "$ASSET_FILTER" \
+    | grep -v '\.exe"' \
+    | cut -d '"' -f 4 \
+    | head -n 1)"
+
+if [ -z "$DOWNLOAD_URL" ]; then
+    echo "Failed to resolve EVEDBTool download URL for architecture: $ARCH"
+    exit 1
 fi
 
-if [[ $arch == x86_64* ]];
-then
-echo "Using x86_64 build..."
-# Download with curl
-DOWNLOAD_URL=$(curl -s https://api.github.com/repos/EvEmu-Project/EVEDBTool/releases/latest \
-        | grep browser_download_url \
-        | grep evedbtool | grep -v exe \
-        | cut -d '"' -f 4)
+TMP_OUT="evedbtool.tmp"
+curl -fsSL "$DOWNLOAD_URL" -o "$TMP_OUT"
+install -m 0755 "$TMP_OUT" evedbtool
+rm -f "$TMP_OUT"
+
+if [ ! -x evedbtool ]; then
+    echo "EVEDBTool download completed but executable was not created."
+    exit 1
 fi
 
-curl --output evedbtool -s -L "$DOWNLOAD_URL"
-chmod +x evedbtool
+echo "EVEDBTool downloaded to $(pwd)/evedbtool"

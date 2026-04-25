@@ -25,6 +25,7 @@
  */
 
 #include "eve-server.h"
+#include <cstdio>
 // version
 #include "../eve-common/EVEVersion.h"
 
@@ -170,8 +171,11 @@
 #include "system/BubbleManager.h"
 #include "system/KeeperService.h"
 #include "system/ScenarioService.h"
+#include "system/CQService.h"
+#include "system/CQManager.h"
 #include "system/sov/SovereigntyMgrService.h"
 #include "system/sov/SovereigntyDataMgr.h"
+#include "system/WorldSpaceServer.h"
 #include "system/WormholeSvc.h"
 // cosmic managers
 #include "system/cosmicMgrs/AnomalyMgr.h"
@@ -730,6 +734,11 @@ int main( int argc, char* argv[] )
     newSvcMgr.Register(new netStateServer());
     newSvcMgr.Register(new UserService());
     newSvcMgr.Register(new MovementService(&newSvcMgr));
+    newSvcMgr.Register(new WorldSpaceServer());
+    newSvcMgr.Register(new CQService(newSvcMgr));
+    std::fprintf(stderr, "[CQ] Registered worldSpaceServer + captainsQuartersSvc (stderr probe; rebuild check).\n");
+    std::fflush(stderr);
+    sLog.Cyan("CQ", "[CQ] Registered worldSpaceServer + captainsQuartersSvc.");
     newSvcMgr.Register(new InfoGatheringMgr());
     newSvcMgr.Register(new PetitionerService());
     newSvcMgr.Register(new ClientStatLogger());

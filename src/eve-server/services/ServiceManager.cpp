@@ -25,6 +25,26 @@
 
 #include "ServiceManager.h"
 
+#include <cstring>
+
+namespace {
+
+EVEServiceManager::ServicesMap::iterator FindServiceIt(
+    EVEServiceManager::ServicesMap& services,
+    const std::string& service)
+{
+    auto it = services.find(service);
+    if (it != services.end())
+        return it;
+    for (it = services.begin(); it != services.end(); ++it) {
+        if (!strcasecmp(it->first.c_str(), service.c_str()))
+            return it;
+    }
+    return services.end();
+}
+
+}  // namespace
+
 EVEServiceManager::EVEServiceManager(NodeID nodeId) :
     mLastBoundId (1),
     mNodeId (nodeId)
@@ -36,7 +56,7 @@ void EVEServiceManager::Register(Dispatcher* service) {
 }
 
 Dispatcher* EVEServiceManager::Lookup(const std::string& service) {
-    auto it = this->mServices.find(service);
+    auto it = FindServiceIt(this->mServices, service);
 
     if (it == this->mServices.end())
         throw service_not_found(service);
@@ -56,7 +76,7 @@ BoundID EVEServiceManager::RegisterBoundService(BoundDispatcher* service) {
 }
 
 PyResult EVEServiceManager::Dispatch(const std::string& service, const std::string& method, PyCallArgs& args) {
-    auto it = this->mServices.find(service);
+    auto it = FindServiceIt(this->mServices, service);
 
     if (it == this->mServices.end())
         throw service_not_found(service);
@@ -128,7 +148,7 @@ std::string pyRepToString (PyRep* v) {
 }
 
 std::string EVEServiceManager::DebugDispatch (const std::string& service, const std::string& method, PyCallArgs& args) {
-    auto it = this->mServices.find (service);
+    auto it = FindServiceIt(this->mServices, service);
 
     if (it == this->mServices.end ())
         return "Service not found";

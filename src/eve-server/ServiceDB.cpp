@@ -181,6 +181,7 @@ void ServiceDB::SetServerOnlineStatus(bool online) {
     sDatabase.RunQuery(err, "UPDATE chrCharacters SET online = 0 WHERE 1");
     sDatabase.RunQuery(err, "UPDATE account SET online = 0 WHERE 1");
     sDatabase.RunQuery( err, "DELETE FROM chrPausedSkillQueue WHERE 1");
+    sDatabase.RunQuery( err, "DELETE FROM staCQOccupancy WHERE 1");
 }
 
 void ServiceDB::SetAccountOnlineStatus(uint32 accountID, bool online) {
@@ -326,6 +327,90 @@ void ServiceDB::SaveServerStats(double threads, float rss, float vm, float user,
 	    threads, rss, vm, user, kernel, items, bubbles, sEntityList.GetSystemCount(), sEntityList.GetNPCCount()/*, sEntityList.GetConnections()*/);
 
     _log(DATABASE__INFO, "Server Stats Saved");
+}
+
+uint32 ServiceDB::GetOrCreateCQWorldSpace(uint32 stationID) {
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT worldSpaceID FROM staCQInstances "
+        "WHERE stationID = %u AND state = 1 "
+        "ORDER BY worldSpaceID ASC LIMIT 1",
+        stationID))
+    {
+        _log(DATABASE__ERROR, "GetOrCreateCQWorldSpace: query failed: %s", res.error.c_str());
+        return 0;
+    }
+
+    DBResultRow row;
+    if (res.GetRow(row)) {
+        const uint32 ws = row.GetUInt(0);
+        sLog.Green("CQ", "[CQ] GetOrCreateCQWorldSpace: station=%u -> existing worldSpaceID=%u", stationID, ws);
+        return ws;
+    }
+
+    DBerror err;
+    uint32 worldSpaceID = 0;
+    if (!sDatabase.RunQueryLID(err, worldSpaceID,
+        "INSERT INTO staCQInstances (stationID, worldSpaceTypeID, isShared, maxOccupants, state, createdAt, lastActiveAt) "
+        "VALUES (%u, 1, 1, 64, 1, UNIX_TIMESTAMP(CURRENT_TIMESTAMP), UNIX_TIMESTAMP(CURRENT_TIMESTAMP))",
+        stationID))
+    {
+        // Another process/thread may have inserted first; re-query active row.
+        if (sDatabase.RunQuery(res,
+            "SELECT worldSpaceID FROM staCQInstances "
+            "WHERE stationID = %u AND state = 1 "
+            "ORDER BY worldSpaceID ASC LIMIT 1",
+            stationID))
+        {
+            DBResultRow retryRow;
+            if (res.GetRow(retryRow)) {
+                return retryRow.GetUInt(0);
+            }
+        }
+        _log(DATABASE__ERROR, "GetOrCreateCQWorldSpace: insert failed and retry-select empty: %s", err.c_str());
+        return 0;
+    }
+    sLog.Green("CQ", "[CQ] GetOrCreateCQWorldSpace: station=%u -> inserted worldSpaceID=%u", stationID, worldSpaceID);
+    return worldSpaceID;
+}
+
+void ServiceDB::SetCQOccupancy(uint32 worldSpaceID, uint32 characterID, bool inWorldspace) {
+    DBerror err;
+    if (inWorldspace) {
+        sDatabase.RunQuery(err,
+            "INSERT INTO staCQOccupancy (worldSpaceID, characterID, occupancyState, joinedAt, lastSeenAt) "
+            "VALUES (%u, %u, 1, UNIX_TIMESTAMP(CURRENT_TIMESTAMP), UNIX_TIMESTAMP(CURRENT_TIMESTAMP)) "
+            "ON DUPLICATE KEY UPDATE occupancyState = 1, lastSeenAt = UNIX_TIMESTAMP(CURRENT_TIMESTAMP)",
+            worldSpaceID, characterID);
+        sLog.Green("CQ", "[CQ] SetCQOccupancy: UPSERT char=%u worldSpace=%u (in=1)", characterID, worldSpaceID);
+    } else {
+        sDatabase.RunQuery(err,
+            "DELETE FROM staCQOccupancy WHERE worldSpaceID = %u AND characterID = %u",
+            worldSpaceID, characterID);
+        sLog.Green("CQ", "[CQ] SetCQOccupancy: DELETE char=%u worldSpace=%u (in=0)", characterID, worldSpaceID);
+    }
+}
+
+uint32 ServiceDB::GetSceneIDForStation(uint32 stationID) {
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT COALESCE(lsStation.sceneID, lsSystem.sceneID, 0) "
+        "FROM staStations st "
+        "LEFT JOIN locationScenes lsStation ON lsStation.locationID = st.stationID "
+        "LEFT JOIN locationScenes lsSystem ON lsSystem.locationID = st.solarSystemID "
+        "WHERE st.stationID = %u "
+        "LIMIT 1",
+        stationID))
+    {
+        _log(DATABASE__ERROR, "GetSceneIDForStation: query failed for station %u: %s", stationID, res.error.c_str());
+        return 0;
+    }
+
+    DBResultRow row;
+    if (!res.GetRow(row)) {
+        return 0;
+    }
+    return row.GetUInt(0);
 }
 
 // lookupService db calls moved here...made no sense in LSCDB file.

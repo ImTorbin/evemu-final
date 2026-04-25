@@ -54,8 +54,8 @@ COPY --from=app-build /app/ /app
 # Add SQL loading tools
 ADD /sql/ /src/sql
 
-# Run SQL tool script via shell (avoids execute-bit dependency)
-RUN cd /src/sql && sh ./get_evedbtool.sh
+# Download EVEDBTool and fail build if artifact is missing/non-executable.
+RUN cd /src/sql && bash ./get_evedbtool.sh && test -x /src/sql/evedbtool
 
 # Expose server ports
 EXPOSE 26000

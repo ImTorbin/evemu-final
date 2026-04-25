@@ -178,6 +178,7 @@ EVEServerConfig::EVEServerConfig()
     cosmic.WormHoleEnabled = false;
     cosmic.CiviliansEnabled = false;
     cosmic.BumpEnabled = false;
+    cosmic.NoPlayerCollision = false;
 
     // exploring
     exploring.Gravametric = 5;
@@ -225,6 +226,7 @@ EVEServerConfig::EVEServerConfig()
     // testing
     testing.EnableDrones = false;
     testing.ShipHeat = false;
+    testing.EnableSharedCaptainsQuarters = true;
 
     // debug
     debug.BeanCount = false;
@@ -716,6 +718,7 @@ bool EVEServerConfig::ProcessCosmic( const TiXmlElement* ele )
     AddValueParser( "WormHoleEnabled",      cosmic.WormHoleEnabled );
     AddValueParser( "CiviliansEnabled",     cosmic.CiviliansEnabled);
     AddValueParser( "BumpEnabled",          cosmic.BumpEnabled );
+    AddValueParser( "NoPlayerCollision",    cosmic.NoPlayerCollision );
 
     const bool result = ParseElementChildren( ele );
 
@@ -729,6 +732,7 @@ bool EVEServerConfig::ProcessCosmic( const TiXmlElement* ele )
     RemoveParser( "WormHoleEnabled" );
     RemoveParser( "CiviliansEnabled" );
     RemoveParser( "BumpEnabled" );
+    RemoveParser( "NoPlayerCollision" );
 
     return result;
 }
@@ -869,11 +873,13 @@ bool EVEServerConfig::ProcessTesting(const TiXmlElement* ele)
 {
     AddValueParser( "ShipHeat",             testing.ShipHeat );
     AddValueParser( "EnableDrones",         testing.EnableDrones);
+    AddValueParser( "EnableSharedCaptainsQuarters", testing.EnableSharedCaptainsQuarters);
 
     const bool result = ParseElementChildren( ele );
 
     RemoveParser( "ShipHeat" );
     RemoveParser( "EnableDrones" );
+    RemoveParser( "EnableSharedCaptainsQuarters" );
 
     return result;
 }

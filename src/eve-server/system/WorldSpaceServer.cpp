@@ -10,9 +10,11 @@
 
 #include "eve-server.h"
 
+#include <cstdio>
 
-
+#include "ServiceDB.h"
 #include "system/WorldSpaceServer.h"
+#include "system/CQManager.h"
 
 WorldSpaceServer::WorldSpaceServer() :
     Service("worldSpaceServer")
@@ -30,22 +32,57 @@ WorldSpaceServer::WorldSpaceServer() :
 }
 
 PyResult WorldSpaceServer::GetWorldSpaceTypeIDFromWorldSpaceID(PyCallArgs &call, PyInt* worldSpaceID) {
+    std::fprintf(stderr, "[CQ] worldSpaceServer.GetWorldSpaceTypeIDFromWorldSpaceID worldSpaceID=%u\n",
+        worldSpaceID->value());
+    std::fflush(stderr);
     /**
      *        worldSpaceTypeID = self.GetWorldSpaceTypeIDFromWorldSpaceID(worldSpaceID)
      */
-    sLog.White( "WorldSpaceServer::Handle_GetWorldSpaceTypeIDFromWorldSpaceID()", "size=%lu", call.tuple->size());
+    sLog.Green("CQ", "[CQ] worldSpaceServer.GetWorldSpaceTypeIDFromWorldSpaceID: worldSpaceID=%u (tuple size=%lu)",
+        worldSpaceID->value(), call.tuple->size());
     call.Dump(SERVICE__CALL_DUMP);
 
-    return PyStatic.NewNone();
+    if (worldSpaceID->value() == 0) {
+        return new PyInt(0);
+    }
+
+    uint32 stationID = 0;
+    if (IsStationID(worldSpaceID->value())) {
+        stationID = worldSpaceID->value();
+    } else if (sCQMgr.IsInWorldSpace(worldSpaceID->value())) {
+        stationID = sCQMgr.GetStationForWorldSpace(worldSpaceID->value());
+    }
+
+    if (stationID == 0) {
+        return new PyInt(0);
+    }
+
+    const uint32 sceneID = ServiceDB::GetSceneIDForStation(stationID);
+    if (sceneID == 0) {
+        sLog.Error("CQ", "[CQ] worldSpaceServer.GetWorldSpaceTypeIDFromWorldSpaceID: no sceneID mapping for station=%u worldSpaceID=%u",
+            stationID, worldSpaceID->value());
+        return new PyInt(0);
+    }
+
+    sLog.Green("CQ", "[CQ] worldSpaceServer.GetWorldSpaceTypeIDFromWorldSpaceID: worldSpaceID=%u station=%u sceneID=%u",
+        worldSpaceID->value(), stationID, sceneID);
+    return new PyInt(sceneID);
 }
 
 PyResult WorldSpaceServer::GetWorldSpaceMachoAddress(PyCallArgs &call, PyString* address) {
+    std::fprintf(stderr, "[CQ] worldSpaceServer.GetWorldSpaceMachoAddress address=\"%s\"\n",
+        address->content().c_str());
+    std::fflush(stderr);
     /**
      *       service, address = wss.GetWorldSpaceMachoAddress(address)
      */
-    sLog.White( "WorldSpaceServer::Handle_GetWorldSpaceMachoAddress()", "size=%lu", call.tuple->size());
+    sLog.Green("CQ", "[CQ] worldSpaceServer.GetWorldSpaceMachoAddress: address=\"%s\" (tuple size=%lu)",
+        address->content().c_str(), call.tuple->size());
     call.Dump(SERVICE__CALL_DUMP);
 
-    return PyStatic.NewNone();
+    PyTuple* rsp = new PyTuple(2);
+    rsp->SetItem(0, new PyString("captainsQuartersSvc"));
+    rsp->SetItem(1, new PyString(address->content()));
+    return rsp;
 }
 

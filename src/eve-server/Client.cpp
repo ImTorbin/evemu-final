@@ -24,6 +24,9 @@
     Updates:    Allan (rewrite), AlTahir(DaVinci)
 */
 
+#include <cstdio>
+#include <cstring>
+
 #include "EVE_Consts.h"
 #include "EVE_Player.h"
 #include "eve-server.h"
@@ -52,6 +55,7 @@
 #include "station/StationDataMgr.h"
 #include "station/StationOffice.h"
 #include "system/DestinyManager.h"
+#include "system/CQManager.h"
 #include "system/SystemManager.h"
 #include "system/SystemBubble.h"
 #include "system/cosmicMgrs/AnomalyMgr.h"
@@ -811,6 +815,7 @@ void Client::MoveToLocation(uint32 locationID, const GPoint& pt) {
         // if docked, update guestlist
         if (wasDocked and m_undock)
             CharNoLongerInStation();
+        sCQMgr.Leave(this);
 
         if (IsFleetID(m_fleet)) {
             m_fleetTimer.Start(Player::Timer::Fleet);
@@ -1905,7 +1910,11 @@ void Client::ChannelLeft(LSCChannel *chan) {
 void Client::CharNoLongerInStation() {
     // clear station data
     // remove client from station guest list
-    sEntityList.GetStationByID(m_stationData.stationID)->RemoveGuest(this);
+    StationItemRef stRef = sEntityList.GetStationByID(m_stationData.stationID);
+    if (stRef.get() != nullptr) {
+        stRef->RemoveGuest(this);
+    }
+    sCQMgr.Leave(this);
     m_system->SetDockCount(this, false);
     OnCharNoLongerInStation ocnis;
         ocnis.charID = m_char->itemID();
@@ -1944,6 +1953,7 @@ void Client::CharNowInStation() {
         cur->SendNotification("OnCharNowInStation", "stationid", &tmp);
     }
     PySafeDecRef(tmp);
+
 }
 
 /**********************************************************************
@@ -2006,7 +2016,22 @@ void Client::InitSession(int32 characterID)
         pSession->SetInt("stationid", stationID);
         pSession->SetInt("stationid2", stationID);
         pSession->SetInt("locationid", stationID);
+        // worldspaceid must stay the station (location) id while docked; the client maps it to
+        // scene graphs via worldSpaceServer. DB CQ instance ids (small auto-increment) are not
+        // interchangeable and break ProximityTrigger / BracketClient if written here.
         pSession->SetInt("worldspaceid", stationID);
+
+        // Test-server fallback for clients that never invoke CQ RPC flow after login.
+        if (sConfig.testing.EnableSharedCaptainsQuarters && sConfig.debug.IsTestServer) {
+            const uint32 ws = sCQMgr.Join(this, stationID);
+            if (ws != 0) {
+                sLog.Cyan("CQ", "[CQ] InitSession AutoJoin fallback: char=%u (%s) station=%u cqInstance=%u (session.worldspaceid stays station)",
+                    GetCharacterID(), GetName(), stationID, ws);
+            } else {
+                sLog.Error("CQ", "[CQ] InitSession AutoJoin fallback failed: char=%u (%s) station=%u",
+                    GetCharacterID(), GetName(), stationID);
+            }
+        }
     } else {
         m_locationID = solarSystemID;
         pSession->Clear("stationid");   //must be 0 in space
@@ -2307,6 +2332,13 @@ void Client::_SendQueuedUpdates() {
 }
 
 void Client::SendNotification(const char *notifyType, const char *idType, PyTuple *payload, bool seq /*true*/) {
+    if (notifyType != nullptr && std::strstr(notifyType, "CQ") != nullptr) {
+        sLog.Cyan("CQ", "[CQ] macho.Notification -> this client: type=%s idType=%s seq=%s char=%u (%s)",
+            notifyType, idType != nullptr ? idType : "?", seq ? "yes" : "no", GetCharacterID(), GetName());
+        std::fprintf(stderr, "[CQ] Notify type=%s idType=%s char=%u (%s)\n",
+            notifyType, idType != nullptr ? idType : "?", GetCharacterID(), GetName());
+        std::fflush(stderr);
+    }
     //build a little notification out of it.
     EVENotificationStream notify;
     notify.notifyType = notifyType;
@@ -2329,6 +2361,13 @@ void Client::SendNotification(const char *notifyType, const char *idType, PyTupl
 void Client::SendNotification(const char *notifyType, const char *idType, PyTuple **payload, bool seq /*true*/) {
     if ((*payload) == nullptr)
         return;
+    if (notifyType != nullptr && std::strstr(notifyType, "CQ") != nullptr) {
+        sLog.Cyan("CQ", "[CQ] macho.Notification -> this client: type=%s idType=%s seq=%s char=%u (%s)",
+            notifyType, idType != nullptr ? idType : "?", seq ? "yes" : "no", GetCharacterID(), GetName());
+        std::fprintf(stderr, "[CQ] Notify type=%s idType=%s char=%u (%s)\n",
+            notifyType, idType != nullptr ? idType : "?", GetCharacterID(), GetName());
+        std::fflush(stderr);
+    }
     //build a little notification out of it.
     EVENotificationStream notify;
         notify.notifyType = notifyType;
@@ -2374,6 +2413,45 @@ void Client::SendNotification(const PyAddress &dest, EVENotificationStream &noti
     }
 
     QueuePacket(packet);
+}
+
+void Client::SendLiveUpdatePing(const char* tag)
+{
+    // Build a util.KeyVal( codeType='globalClassMethod',
+    //                      objectID=<tag>'::Marker',
+    //                      methodName='pingMethod',
+    //                      code='\x4e' )  -- marshal.dumps(None) in Py2.7.
+    //
+    // Why these values:
+    //   - The client's liveUpdateSvc.OnLiveClientUpdate calls LogInfo with
+    //     codeType/objectID/methodName *first*, which is the evidence we
+    //     want to see in LogServer.
+    //   - It then calls marshal.loads(theUpdate.code). 0x4E unmarshals to
+    //     None cleanly, so no exception propagates into sm.ScatterEvent.
+    //   - codeType 'globalClassMethod' splits objectID on '::' and looks
+    //     up the namespace; with a synthetic guid the lookup misses and
+    //     the dispatcher LogError's "namespace not found" without raising.
+    //   - Net effect: one identifiable LogInfo + one harmless LogError per
+    //     ping, no client risk.
+    static const uint8 kMarshalNone = 0x4E; // 'N'
+
+    PyDict* args = new PyDict();
+    args->SetItemString("codeType",   new PyString("globalClassMethod"));
+    {
+        std::string objectID = (tag != nullptr ? tag : "evemu.phase0");
+        objectID.append("::Marker");
+        args->SetItemString("objectID", new PyString(objectID));
+    }
+    args->SetItemString("methodName", new PyString("pingMethod"));
+    args->SetItemString("code",       new PyBuffer(size_t(1), kMarshalNone));
+
+    PyTuple* payload = new PyTuple(1);
+    payload->SetItem(0, new PyObject("util.KeyVal", args));
+
+    sLog.Cyan("LU", "[LU-PHASE0] Sending OnLiveClientUpdate ping (tag=%s) to %s(%u)",
+        tag != nullptr ? tag : "<null>", GetName(), GetCharacterID());
+
+    SendNotification("OnLiveClientUpdate", "clientID", &payload, false);
 }
 
 /************************************************************************/
@@ -2721,6 +2799,68 @@ void Client::_SendPingResponse(const PyAddress& source, int64 callID)
 /************************************************************************/
 /* EVEPacketDispatcher interface                                        */
 /************************************************************************/
+
+namespace {
+
+/** Case-insensitive haystack contains needle (ASCII only; sufficient for service / method tokens). */
+bool AsciiContainsCi(const char* hay, const char* needle) {
+    if (hay == nullptr || needle == nullptr || *needle == '\0')
+        return false;
+    for (; *hay != '\0'; ++hay) {
+        const char* h = hay;
+        const char* n = needle;
+        while (*h != '\0' && *n != '\0') {
+            unsigned char a = static_cast<unsigned char>(*h);
+            unsigned char b = static_cast<unsigned char>(*n);
+            if (a >= 'A' && a <= 'Z')
+                a = static_cast<unsigned char>(a + ('a' - 'A'));
+            if (b >= 'A' && b <= 'Z')
+                b = static_cast<unsigned char>(b + ('a' - 'A'));
+            if (a != b)
+                break;
+            ++h;
+            ++n;
+        }
+        if (*n == '\0')
+            return true;
+    }
+    return false;
+}
+
+bool CallReqLooksLikeCQ(const char* svc, const char* method) {
+    if (method != nullptr) {
+        if (!strcmp(method, "JoinSharedQuarters") || !strcmp(method, "LeaveSharedQuarters")
+            || !strcmp(method, "GetSnapshot") || !strcmp(method, "UpdateTransform"))
+            return true;
+        if (AsciiContainsCi(method, "quarters") || AsciiContainsCi(method, "worldspace")
+            || AsciiContainsCi(method, "captains"))
+            return true;
+    }
+    if (svc != nullptr && *svc != '\0') {
+        if (!strcasecmp(svc, "worldSpaceServer"))
+            return true;
+        if (AsciiContainsCi(svc, "worldspace") || AsciiContainsCi(svc, "quarter"))
+            return true;
+    }
+    return false;
+}
+
+bool ParseBoundID(const std::string& boundStr, uint32& nodeID, uint32& bindID) {
+    if (boundStr.empty()) {
+        return false;
+    }
+
+    // Bound object IDs are emitted as "N=<node>:<bind>", but accept lowercase
+    // too so mixed-casing from callers does not break dispatch/release paths.
+    if (sscanf(boundStr.c_str(), "%*[Nn]=%u:%u", &nodeID, &bindID) == 2) {
+        return true;
+    }
+
+    return false;
+}
+
+}  // namespace
+
 bool Client::Handle_CallReq(PyPacket* packet, PyCallStream& req)
 {
     // build arguments
@@ -2731,8 +2871,19 @@ bool Client::Handle_CallReq(PyPacket* packet, PyCallStream& req)
     // try to handle with the new service handler and fallback to the old version
     try
     {
+        {
+            const char* svc = packet->dest.service.c_str();
+            const char* m = req.method.c_str();
+            if (CallReqLooksLikeCQ(svc, m)) {
+                sLog.Cyan("CQ", "[CQ] CallReq service=\"%s\" bind=\"%s\" method=\"%s\" char=%d (%s)",
+                    svc, req.remoteObjectStr.c_str(), m, GetCharacterID(), GetName());
+                std::fprintf(stderr, "[CQ] CallReq svc=\"%s\" bind=\"%s\" method=\"%s\" char=%u (%s)\n",
+                    svc, req.remoteObjectStr.c_str(), m, GetCharacterID(), GetName());
+                std::fflush(stderr);
+            }
+        }
         if (packet->dest.service == "") {
-            if (sscanf(req.remoteObjectStr.c_str(), "N=%u:%u", &nodeID, &bindID) != 2) {
+            if (!ParseBoundID(req.remoteObjectStr, nodeID, bindID)) {
                 sLog.Error("Client::CallReq", "Failed to parse bind string '%s'.", req.remoteObjectStr.c_str());
                 return false;
             }
@@ -2809,7 +2960,7 @@ bool Client::Handle_Notify(PyPacket* packet)
                 continue;
             }
 
-            if (sscanf(element.boundID.c_str(), "N=%u:%u", &nodeID, &bindID) != 2) {
+            if (!ParseBoundID(element.boundID, nodeID, bindID)) {
                 sLog.Error("Client::Notify","Notification '%s' from %s: Failed to parse bind string '%s'. Skipping.", \
                            notify.method.c_str(), m_char->name(), element.boundID.c_str());
                 continue;

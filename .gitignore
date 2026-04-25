@@ -122,3 +122,11 @@ sql.tar.gz
 .idea
 CMakeSettings.json
 log.ini
+
+# Large client mod assets (decompiled client tree, build output, tooling, binaries).
+# We commit only the small scripts under client_mod/{liveupdates,scripts,sql,eve}/.
+client_mod/eve_code/
+client_mod/out/
+client_mod/tools/
+client_mod/compiled.code
+client_mod/**/*.bak

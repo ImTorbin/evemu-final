@@ -49,7 +49,21 @@ dungeons-dir: /src/sql/dungeons
 EOF
 
 echo "Running EVEDBTool..."
-/src/sql/evedbtool install
+if mysql -h "$MARIADB_HOST" -u "$MARIADB_USER" -p"$MARIADB_PASSWORD" "$MARIADB_DATABASE" -e "SHOW TABLES LIKE 'migrations';" | grep -q migrations; then
+    echo "Existing database detected (migrations table found). Running incremental migrations..."
+    /src/sql/evedbtool up
+else
+    echo "Fresh database detected. Running full install..."
+    /src/sql/evedbtool install
+fi
+
+# Object cache is persisted in /app/server_cache (docker volume). If DB rows change
+# (e.g. dgmExpressions stubs), remove stale dogma cache files so they regenerate.
+if [ -d /app/server_cache ]; then
+    rm -f /app/server_cache/config.BulkData.dgmexpressions.cache
+    rm -f /app/server_cache/config.BulkData.dgmeffects.cache
+    rm -f /app/server_cache/config.BulkData.dgmtypeeffects.cache
+fi
 
 if [ "$SEED_MARKET" == "TRUE" ]
 then
