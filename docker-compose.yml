@@ -11,6 +11,8 @@ services:
       - server_cache:/app/server_cache
       # Bind repo image_cache (NPC portraits, player uploads) so seeded JPEGs are available without a separate volume seed step.
       - ./image_cache:/app/image_cache
+      # Host migrations overlay the baked image so `git pull` new SQL applies without rebuilding the image first.
+      - ./sql/migrations:/src/sql/migrations:ro
     ports:
       - "0.0.0.0:26000:26000/tcp"
       - "0.0.0.0:26001:26001/tcp"
