@@ -170,7 +170,10 @@ PyResult CertificateMgrService::BatchCertificateUpdate(PyCallArgs &call, PyDict*
 PyResult CertificateMgrService::GetCertificatesByCharacter(PyCallArgs& call, PyInt* characterID)
 {
     CertMap crt;
-    sItemFactory.GetCharacterRef(characterID->value())->GetCertificates(crt);
+    CharacterRef ch = sItemFactory.GetCharacterRef(characterID->value());
+    if (ch) {
+        ch->GetCertificates(crt);
+    }
 
     util_Rowset rs;
         rs.lines = new PyList();

@@ -232,6 +232,9 @@ struct TotalStruct {
 
 #pragma pack()
 
+/** Live-client warp ball sentinels for AddBalls / full EncodeDestiny; 0/0 can desync michelle for late joiners. */
+static const int64 WARP_SNAPSHOT_FOLLOW_RANGE = -4616189618054758400LL;
+static const int64 WARP_SNAPSHOT_FOLLOW_ID = 4669471951536783360LL;
 
 } //end Destiny
 

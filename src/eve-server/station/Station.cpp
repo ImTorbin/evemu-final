@@ -342,6 +342,7 @@ void StationSE::EncodeDestiny( Buffer& into )
 PyDict *StationSE::MakeSlimItem() {
     _log(SE__SLIMITEM, "MakeSlimItem for StationSE %s(%u)", m_self->name(), m_self->itemID());
     PyDict *slim = new PyDict();
+        slim->SetItemString("ballID",          new PyLong(m_self->itemID()));
         slim->SetItemString("groupID",          new PyInt(m_self->groupID()));
         slim->SetItemString("name",             new PyString(m_self->itemName()));
         slim->SetItemString("corpID",           IsCorp(m_corpID) ? new PyInt(m_corpID) : PyStatic.NewNone());

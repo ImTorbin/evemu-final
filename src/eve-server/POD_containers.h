@@ -206,6 +206,8 @@ struct SpawnEntry {     // notes for me while creating/writing/testing
     uint32 itemID;      // rat entity id
     uint32 corpID;      // rat corp id
     uint32 factionID;   // rat faction id
+    /** Root cosmic itemID for dungeon sites (AnomalyMgr / DungeonMgr); 0 = not dungeon-tagged */
+    uint32 dungeonRootID;
 };
 
 /* POD structure for spawn faction groups */

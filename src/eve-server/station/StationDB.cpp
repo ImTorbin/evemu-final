@@ -382,3 +382,37 @@ void StationDB::GetOutpostImprovements(uint32 stationID, DBQueryResult& res)
     "FROM staImprovementsInstalled "
     "WHERE stationID=%u", stationID);
 }
+
+bool StationDB::GetStationsInSolarSystem(uint32 solarSystemID, std::vector<uint32>& into)
+{
+    into.clear();
+    if (solarSystemID == 0)
+        return false;
+
+    DBQueryResult res;
+    if (not sDatabase.RunQuery(res, "SELECT stationID FROM staStations WHERE solarSystemID = %u", solarSystemID)) {
+        codelog(DATABASE__ERROR, "GetStationsInSolarSystem: %s", res.error.c_str());
+        return false;
+    }
+
+    DBResultRow row;
+    while (res.GetRow(row))
+        into.push_back(row.GetUInt(0));
+
+    return (not into.empty());
+}
+
+uint32 StationDB::GetSolarSystemIDForStation(uint32 stationID)
+{
+    if (stationID == 0)
+        return 0;
+    DBQueryResult res;
+    if (not sDatabase.RunQuery(res, "SELECT solarSystemID FROM staStations WHERE stationID = %u LIMIT 1", stationID)) {
+        codelog(DATABASE__ERROR, "GetSolarSystemIDForStation: %s", res.error.c_str());
+        return 0;
+    }
+    DBResultRow row;
+    if (not res.GetRow(row))
+        return 0;
+    return row.GetUInt(0);
+}

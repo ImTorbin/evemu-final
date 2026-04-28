@@ -68,6 +68,14 @@ class SystemBubble;
 class SystemEntity;
 class SystemManager;
 
+/** Destiny NPC orbit finite-state phases (orthogonal to Destiny::Ball::Orbit hysteresis labels). */
+enum class DestinyOrbitPhase : uint8_t {
+    None = 0,
+    Approach, ///< subwarp/bracket steering until close to analytic ring radius
+    OnRing,   ///< ψ = −ω·t + φ analytic ring integration; kinematic |v|=ω·r for observers
+    Reacquire ///< target warped/discontinuous jump; reposition before locking ring
+};
+
 // common variables to denote accpetable alignment deviations
 static const float TURN_ALIGNMENT = 4.0f;
 static const float WARP_ALIGNMENT = 6.0f;
@@ -101,6 +109,8 @@ public:
     ~DestinyManager();
 
     void Process();
+    /** Subwarp / approach / orbit integration for non-pilot entities (~10Hz). Full Process() stays 1Hz. */
+    void ProcessHighFreqState();
 
     void SendSingleDestinyEvent(PyTuple** ev, bool self_only=false) const;
     void SendSingleDestinyUpdate(PyTuple** up, bool self_only=false) const;
@@ -110,8 +120,10 @@ public:
     /* Informational query functions: */
     const GPoint &GetPosition() const                   { return m_position; }
     const GVector &GetVelocity() const                  { return m_velocity; }
-    float GetSpeedFraction()                            { return m_timeFraction; }
-    float GetSpeed()                                    { return (m_maxShipSpeed * m_timeFraction); }
+    /** Fraction of max speed actually moving (DataSector.speedfraction); NOT m_timeFraction (accel curve). */
+    float GetSpeedFraction();
+    /** Scalar speed in m/s; matches |m_velocity| when non-trivial (avoids m_maxShipSpeed*m_timeFraction desync). */
+    float GetSpeed();
 
     // this is only used by my bubble debug command
     uint8 GetState()                                    { return m_ballMode; }
@@ -211,7 +223,9 @@ public:
     SystemEntity* GetTargetEntity()                     { return m_targetEntity.second; }
     GPoint GetTargetPoint()                             { return m_targetPoint; }
     double GetMaxVelocity()                             { return m_maxShipSpeed; }
-    double GetFollowDistance()                          { return m_targetDistance; }
+    /** FOLLOW/ORBIT encoded range (CmdFollow/CmdOrbit snapshot structs): simulated radius (m_followDistance). */
+    double GetFollowDistance()                          { return ((m_ballMode == Destiny::Ball::Mode::FOLLOW \
+                                                                || m_ballMode == Destiny::Ball::Mode::ORBIT) ? static_cast<double>(m_followDistance) : m_targetDistance); }
     double GetMass()                                    { return m_mass; }
     double GetAgility()                                 { return m_shipAgility; }
     double GetInertia()                                 { return m_shipInertia; }
@@ -236,6 +250,9 @@ public:
 
     bool IsFrozen()                                     { return m_frozen; }
     void SetFrozen(bool set=false)                      { m_frozen = set; }
+
+    /** Current analytic-orbit finite-state phase (Orbiting()/ProcessHighFreq orbit path). */
+    DestinyOrbitPhase GetDestinyOrbitPhase() const     { return m_orbitPhase; }
 
     // Prevents actions if the player is performing the login warp
     bool AbortIfLoginWarping(bool showMsg);
@@ -297,12 +314,19 @@ protected:
     int32 m_stopDistance;               //from destination, in m
 
     uint8 m_turnTic;                    //time into turn
-    int8 m_orbiting;                    // 0=no orbit, >0=in orbit, 1=at distance, 2=too close , 3=too far, 4=way too close, 5=way too far
+    int8 m_orbiting;                    // hysteresis bands (TooFar/Close…) for Turn() — keep synced with Approach/OnRing
+    DestinyOrbitPhase m_orbitPhase;      // finite-state analytic orbit lifecycle
+    GPoint m_orbitPrevTargetPos;         // detects warps/jumps vs last tick auth target point
+    bool m_orbitHasPrevTargetPos;
     //Destiny::Ball::stateStamp m_stateStamp; //state and count of current state since beginning, in seconds
     //Destiny::Ball::timeStamp m_timeStamp; //mode and timestamp of when current mode began
     uint32 m_stateStamp;                //statestamp of when current state began, in seconds
     uint32 m_lastPosBroadcast;          //legacy 1Hz stamp counter retained for compatibility/logging
     uint32 m_lastPosBroadcastMS;        //monotonic ms timestamp of last observer SetBallPosition for piloted ships
+    /** Wall-clock delta for integrating m_velocity (m/s) in MoveObject (pilots + NPCs at DynamicDestinyMs). */
+    uint32 m_lastNpcMoveIntegrateMS;
+    /** Same idea for GOTO/FOLLOW: ~10Hz integration + every-tick SetBall* fights client subwarp prediction → jerk. */
+    uint32 m_lastNpcGotoFollowBroadcastMS;
     uint32 m_lastSelfSyncMS;            //monotonic ms timestamp of last pilot self-correction snap
     uint32 m_lastCloakProxCheck;        //stamp of last cloak proximity check (throttles O(bubble) scans)
 
@@ -316,6 +340,9 @@ protected:
 
     float m_orbitTime;                  //in s - time to complete one orbit using current variables
     float m_orbitRadTic;                //in rad/sec  - radians around orbit per tic
+    /** Added to ring theta so NPCs that start orbiting together do not share one point on the circle. */
+    float m_orbitPhaseOffsetRad;
+    uint32 m_orbitPhaseOriginMS;        // GetTimeMSeconds() when orbit ring phase should be measured (smooth vs 1Hz stamp)
     float m_timeFraction;               //fuzzy logic - holds current euler value for time
     float m_turnFraction;               //fuzzy logic - used for turn accel/decel checks
     float m_prevSpeedFraction;          //fuzzy logic - previous percent of full speed.  used for speed changes
@@ -360,9 +387,8 @@ private:
     void Turn();                       //apply velocity and heading updates as needed for turning
     void ClearTurn();
 
-    // Internal Orbit shit      -allan  Jan 2020
-    GPoint ComputePosition(double curRad);   // currently testing...wip
-    double m_inclination;               //inclination of orbit
+    // Internal orbit
+    double m_inclination;               //inclination of orbit (legacy / unused orbit elements)
     double m_longAscNode;               //longitude of ascending node
     void ClearOrbit();
 

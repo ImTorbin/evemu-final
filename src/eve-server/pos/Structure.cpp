@@ -248,17 +248,35 @@ void StructureSE::InitData()
 
     if (m_sbu)
     { //SBUs are placed near stargates
-        m_gateSE = m_system->GetClosestGateSE(GetPosition())->GetGateSE();
+        SystemEntity* pGate = m_system->GetClosestGateSE(GetPosition());
+        if (pGate == nullptr or !pGate->IsGateSE()) {
+            _log(POS__ERROR, "StructureSE::InitData - no stargate in system %u for %s(%u).",
+                 m_system->GetID(), GetName(), GetID());
+            return;
+        }
+        m_gateSE = pGate->GetGateSE();
         m_data.anchorpointID = m_gateSE->GetID();
     }
     if (m_platform)
     { //Construction Platforms are anchored near planets
-        m_planetSE = m_system->GetClosestPlanetSE(GetPosition())->GetPlanetSE();
+        SystemEntity* pPlanet = m_system->GetClosestPlanetSE(GetPosition());
+        if (pPlanet == nullptr or !pPlanet->IsPlanetSE()) {
+            _log(POS__ERROR, "StructureSE::InitData - no planet in system %u for %s(%u).",
+                 m_system->GetID(), GetName(), GetID());
+            return;
+        }
+        m_planetSE = pPlanet->GetPlanetSE();
         m_data.anchorpointID = m_planetSE->GetID();
     }
     else
-    { //Everything else is places near a moon
-        m_moonSE = m_system->GetClosestMoonSE(GetPosition())->GetMoonSE();
+    { //Everything else is placed near a moon
+        SystemEntity* pMoon = m_system->GetClosestMoonSE(GetPosition());
+        if (pMoon == nullptr or !pMoon->IsMoonSE()) {
+            _log(POS__ERROR, "StructureSE::InitData - no moon in system %u for %s(%u).",
+                 m_system->GetID(), GetName(), GetID());
+            return;
+        }
+        m_moonSE = pMoon->GetMoonSE();
         m_data.anchorpointID = m_moonSE->GetID();
     }
 }
@@ -1387,7 +1405,7 @@ void StructureSE::Killed(Damage &damage)
         _log(PHYSICS__TRACE, "StructureSE::Killed() - Structure %s(%u) Position: %.2f,%.2f,%.2f.  Wreck %s(%u) Position: %.2f,%.2f,%.2f.",
              GetName(), GetID(), x(), y(), z(), wreckItemRef->name(), wreckItemRef->itemID(), wreckPosition.x, wreckPosition.y, wreckPosition.z);
 
-    DropLoot(wreckItemRef, m_self->groupID(), killerID);
+    DropLoot(wreckItemRef, m_self->groupID(), killerID, pClient != nullptr);
 
     for (auto cur : survivedItems)
         cur->Move(wreckItemRef->itemID(), flagNone); // populate wreck with items that survived

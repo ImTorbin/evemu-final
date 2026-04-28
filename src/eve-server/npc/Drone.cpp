@@ -122,6 +122,30 @@ void DroneSE::Process() {
     SystemEntity::Process();
 
     /** @todo (allan) finish drone AI and processing */
+    if (m_online) {
+        /* No parent ship in this system or not in the same bubble/grid: treat as abandoned (warp, jump, despawn). */
+        if (m_controllerID != 0 && m_bubble != nullptr) {
+            SystemEntity* parent = m_system->GetSE(m_controllerID);
+            if (parent == nullptr || !parent->IsShipSE()) {
+                /* Parent not in this system (warp/jump) — release bandwidth on the ship wherever it is now. */
+                if (m_controllerOwnerID != 0) {
+                    Client* ctlClient = sEntityList.FindClientByCharID(m_controllerOwnerID);
+                    if (ctlClient != nullptr && ctlClient->GetShipSE() != nullptr
+                        && ctlClient->GetShipSE()->GetID() == m_controllerID) {
+                        ctlClient->GetShipSE()->ReleaseLaunchedDrone(this);
+                    }
+                }
+                Abandon();
+            } else {
+                ShipSE* parentShip = parent->GetShipSE();
+                SystemBubble* pb = parentShip->SysBubble();
+                if (pb == nullptr || m_bubble != pb) {
+                    parentShip->ReleaseLaunchedDrone(this);
+                    Abandon();
+                }
+            }
+        }
+    }
     if (m_online)
         m_AI->Process();
 
@@ -148,6 +172,11 @@ void DroneSE::Launch(ShipSE* pShipSE) {
     m_system->AddEntity(this);
 
     assert (m_bubble != nullptr);
+
+    // Destiny ctor read position before bubble nudges; re-sync so sim + inventory agree after AddEntity.
+    const GPoint ip(m_self->position());
+    if (ip.isNotZero() and !ip.isNaN() and !ip.isInf())
+        m_destiny->SetPosition(ip, true);
 }
 
 void DroneSE::Online(ShipSE* pShipSE/*nullptr*/) {
@@ -179,7 +208,10 @@ void DroneSE::IdleOrbit(ShipSE* pShipSE/*nullptr*/) {
     // set speed and begin orbit
     m_destiny->SetMaxVelocity(500);
     m_destiny->SetSpeedFraction(0.6f);
-    m_destiny->Orbit(pShipSE, m_orbitRange);
+    uint32 orbitCmd = static_cast<uint32>(m_orbitRange);
+    if (orbitCmd < 500u)
+        orbitCmd = 500u;
+    m_destiny->Orbit(pShipSE, orbitCmd);
 }
 
 void DroneSE::Abandon() {
@@ -269,16 +301,20 @@ void DroneSE::EncodeDestiny( Buffer& into )
 {
     using namespace Destiny;
 
-    uint8 mode = m_destiny->GetState(); //Ball::Mode::STOP;
+    uint8 mode = m_destiny->GetState();
+    if (mode != Ball::Mode::WARP && mode != Ball::Mode::FOLLOW && mode != Ball::Mode::ORBIT
+            && mode != Ball::Mode::GOTO && mode != Ball::Mode::STOP)
+        mode = Ball::Mode::STOP;
 
     // drone id's begin at 500m
+    const GPoint bh(m_destiny != nullptr ? m_destiny->GetPosition() : GetPosition());
     BallHeader head = BallHeader();
         head.entityID = GetID();
         head.mode = mode;
         head.radius = GetRadius();
-        head.posX = x();
-        head.posY = y();
-        head.posZ = z();
+        head.posX = bh.x;
+        head.posY = bh.y;
+        head.posZ = bh.z;
         head.flags = Ball::Flag::IsFree;
     into.Append( head );
     MassSector mass = MassSector();
@@ -305,10 +341,9 @@ void DroneSE::EncodeDestiny( Buffer& into )
                 warp.targY = target.y;
                 warp.targZ = target.z;
                 warp.speed = m_destiny->GetWarpSpeed();       //ship warp speed x10  (dont ask...this is what it is...more dumb ccp shit)
-                // warp timing.  see Ship::EncodeDestiny() for notes/updates
-                warp.effectStamp = -1; //m_destiny->GetStateStamp();   //timestamp when warp started
-                warp.followRange = 0;   //this isnt right
-                warp.followID = 0;  //this isnt right
+                warp.effectStamp = static_cast<int32>(m_destiny->GetStateStamp());
+                warp.followRange = WARP_SNAPSHOT_FOLLOW_RANGE;
+                warp.followID = WARP_SNAPSHOT_FOLLOW_ID;
             into.Append( warp );
         }  break;
         case Ball::Mode::FOLLOW: {
@@ -347,7 +382,7 @@ void DroneSE::MakeDamageState(DoDestinyDamageState &into)
 {
     into.shield = (m_self->GetAttribute(AttrShieldCharge).get_float() / m_self->GetAttribute(AttrShieldCapacity).get_float());
     into.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_float() + 5;
-    into.timestamp = GetFileTimeNow();
+    into.timestamp = GetFileTimeNowInt64();
     into.armor = 1.0 - (m_self->GetAttribute(AttrArmorDamage).get_float() / m_self->GetAttribute(AttrArmorHP).get_float());
     into.structure = 1.0 - (m_self->GetAttribute(AttrDamage).get_float() / m_self->GetAttribute(AttrHP).get_float());
 }

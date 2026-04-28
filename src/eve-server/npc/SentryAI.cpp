@@ -108,7 +108,7 @@ void SentryAI::Process() {
                     pDestiny = cur->GetShipTarget()->DestinyMgr();
                     if (pDestiny->IsCloaked() or pDestiny->IsWarping())
                         continue;
-                    if (m_npc->GetPosition().distance(cur->GetShipTarget()->GetPosition()) > m_sightRange)
+                    if (m_npc->GetAuthPosition().distance(cur->GetShipTarget()->GetAuthPosition()) > m_sightRange)
                         continue;
                     Target(cur->GetShipTarget());
                     */
@@ -176,7 +176,7 @@ void SentryAI::SetSignaling(SystemEntity* pTarget) {
 
 void SentryAI::CheckDistance(SystemEntity* pTarget)
 {
-    double dist = m_npc->GetPosition().distance(pTarget->GetPosition());
+    double dist = m_npc->GetAuthPosition().distance(pTarget->GetAuthPosition());
     if ((dist > m_sightRange) and (!m_npc->TargetMgr()->IsTargetedBy(pTarget))) {
         _log(NPC__AI_TRACE, "%s(%u): CheckDistance: %s(%u) is too far away (%u).  Return to Idle.", \
                 m_npc->GetName(), m_npc->GetID(), pTarget->GetName(), pTarget->GetID(), dist);
@@ -274,7 +274,7 @@ void SentryAI::Attack(SystemEntity* pTarget)
     if (m_mainAttackTimer.Check()) {
         if (!pTarget) return;
         // Check to see if the target still in the bubble (Client warped out)
-        if (!m_npc->SysBubble()->InBubble(pTarget->GetPosition())) {
+        if (!m_npc->SysBubble()->InBubble(pTarget->GetAuthPosition())) {
             _log(NPC__AI_TRACE, "%s(%u): Target %s(%u) no longer in bubble.  Clear target and move on",
                  m_npc->GetName(), m_npc->GetID(), pTarget->GetName(), pTarget->GetID());
             ClearTarget(pTarget);

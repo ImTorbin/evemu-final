@@ -33,6 +33,19 @@ FLEET__BIND_DUMP
 
 //  Manager class functions and methods...
 
+namespace {
+    /** Docked clients have no ShipSE; solar system is still Client::SystemMgr(). */
+    SystemManager* ClientSolarSystem(Client* c)
+    {
+        if (c == nullptr)
+            return nullptr;
+        ShipSE* ship = c->GetShipSE();
+        if (ship != nullptr && ship->SystemMgr() != nullptr)
+            return ship->SystemMgr();
+        return c->SystemMgr();
+    }
+} // namespace
+
 FleetService::FleetService()
 : m_lsc(nullptr),
 m_initalized(false)
@@ -1546,7 +1559,14 @@ void FleetService::SendFleetUpdate(uint32 fleetID, const char* notifyType, PyTup
 void FleetService::GetFleetMembersOnGrid(Client* pClient, std::vector< uint32 >& data)
 {
     std::vector<Client*> members;
-    uint16 scopeID = pClient->GetShipSE()->SysBubble()->GetID();
+    ShipSE* issuerShip = pClient->GetShipSE();
+    if (issuerShip == nullptr || issuerShip->SysBubble() == nullptr) {
+        // Docked (no bubble): fleet share falls back to issuer only — callers must not divide by zero.
+        if (pClient->InFleet())
+            data.push_back(pClient->GetCharacterID());
+        return;
+    }
+    const uint16 scopeID = issuerShip->SysBubble()->GetID();
     auto range = m_fleetMembers.equal_range(pClient->GetFleetID());
     for (auto fItr = range.first; fItr != range.second; ++fItr)
         members.push_back(fItr->second);
@@ -1554,7 +1574,10 @@ void FleetService::GetFleetMembersOnGrid(Client* pClient, std::vector< uint32 >&
     for (auto cur : members) {
         if (cur == nullptr)
             continue;
-        if (cur->GetShipSE()->SysBubble()->GetID() == scopeID)
+        ShipSE* curShip = cur->GetShipSE();
+        if (curShip == nullptr || curShip->SysBubble() == nullptr)
+            continue;
+        if (curShip->SysBubble()->GetID() == scopeID)
             data.push_back(cur->GetCharacterID());
     }
 }
@@ -1562,7 +1585,10 @@ void FleetService::GetFleetMembersOnGrid(Client* pClient, std::vector< uint32 >&
 void FleetService::GetFleetMembersInSystem(Client* pClient, std::vector< uint32 >& data)
 {
     std::vector<Client*> members;
-    uint16 scopeID = pClient->GetShipSE()->SystemMgr()->GetID();
+    SystemManager* issuerSys = ClientSolarSystem(pClient);
+    if (issuerSys == nullptr)
+        return;
+    const uint32 scopeID = issuerSys->GetID();
     auto range = m_fleetMembers.equal_range(pClient->GetFleetID());
     for (auto fItr = range.first; fItr != range.second; ++fItr)
         members.push_back(fItr->second);
@@ -1570,7 +1596,10 @@ void FleetService::GetFleetMembersInSystem(Client* pClient, std::vector< uint32 
     for (auto cur : members) {
         if (cur == nullptr)
             continue;
-        if (cur->GetShipSE()->SystemMgr()->GetID() == scopeID)
+        SystemManager* curSys = ClientSolarSystem(cur);
+        if (curSys == nullptr)
+            continue;
+        if (curSys->GetID() == scopeID)
             data.push_back(cur->GetCharacterID());
     }
 }
@@ -1578,7 +1607,10 @@ void FleetService::GetFleetMembersInSystem(Client* pClient, std::vector< uint32 
 void FleetService::GetFleetClientsInSystem(Client* pClient, std::vector< Client* >& data)
 {
     std::vector<Client*> members;
-    uint32 scopeID = pClient->GetShipSE()->SystemMgr()->GetID();
+    SystemManager* issuerSys = ClientSolarSystem(pClient);
+    if (issuerSys == nullptr)
+        return;
+    const uint32 scopeID = issuerSys->GetID();
     auto range = m_fleetMembers.equal_range(pClient->GetFleetID());
     for (auto fItr = range.first; fItr != range.second; ++fItr)
         members.push_back(fItr->second);
@@ -1586,7 +1618,10 @@ void FleetService::GetFleetClientsInSystem(Client* pClient, std::vector< Client*
     for (auto cur : members) {
         if (cur == nullptr)
             continue;
-        if (cur->GetShipSE()->SystemMgr()->GetID() == scopeID)
+        SystemManager* curSys = ClientSolarSystem(cur);
+        if (curSys == nullptr)
+            continue;
+        if (curSys->GetID() == scopeID)
             data.push_back(cur);
     }
 }

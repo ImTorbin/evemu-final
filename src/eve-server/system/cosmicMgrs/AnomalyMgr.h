@@ -54,6 +54,15 @@ class AnomalyMgr
 
     void RegisterExitWH(CosmicSignature &sig);
 
+    /** Spawn a probe-down escalation site near a cleared anomaly/unrated location. */
+    void SpawnEscalationAt(const GPoint& nearPos, uint32 ownerID);
+
+    /** Wrecks belong on overview / D-scan only — never ship or probe cosmic scan results. */
+    static bool IsExcludedFromCosmicScanResults(const CosmicSignature& sig, const SystemManager* sys);
+
+    /** invTypes group Wreck, or type name ends with live-style " … Wreck" (covers mis-grouped drone wrecks). */
+    static bool IsWreckLikeTypeID(uint16 typeID);
+
 protected:
     ManagerDB m_mdb;
     ServiceDB m_sdb;

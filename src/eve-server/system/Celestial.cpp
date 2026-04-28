@@ -87,6 +87,29 @@ CelestialSE::CelestialSE(InventoryItemRef self, EVEServiceManager &services, Sys
     _log(SE__DEBUG, "Created CSE for item %s (%u) with radius of %.1f.", self->name(), self->itemID(), m_radius);
 }
 
+void CelestialSE::EncodeDestiny(Buffer& into)
+{
+    using namespace Destiny;
+    BallHeader head = BallHeader();
+        head.entityID = m_self->itemID();
+        head.mode = Ball::Mode::RIGID;
+        head.radius = m_radius;
+        head.posX = x();
+        head.posY = y();
+        head.posZ = z();
+        // Like StaticSystemEntity: system-wide rigid balls. ItemSystemEntity used flags=0 so planets/moons
+        // were bubble-local; client warp FX (effects.warp GetWarpCollisions) then had planetBall=None and
+        // crashed on planetBall.radius when ray-testing the warp line.
+        head.flags = Ball::Flag::IsGlobal;
+    into.Append(head);
+    RIGID_Struct main;
+        main.formationID = 0xFF;
+    into.Append(main);
+
+    _log(SE__DESTINY, "CSE::EncodeDestiny(): %s - id:%lli, mode:%u, flags:0x%X, radius:%.1f",
+        GetName(), head.entityID, head.mode, head.flags, head.radius);
+}
+
 void CelestialSE::MakeDamageState(DoDestinyDamageState &into)
 {
     double shield = 1.0, armor = 1.0, structure = 1.0, recharge = 1000000;
@@ -122,7 +145,10 @@ void AnomalySE::EncodeDestiny(Buffer& into)
         head.posX = x();
         head.posY = y();
         head.posZ = z();
-        head.flags = 0;
+        /* System-wide ball: flags=0 kept the anomaly out of the global ballpark; client warp FX
+         * (effects.warp GetWarpCollisions) then failed ball lookup (planetBall=None) and crashed
+         * on .radius when ray-testing the warp line. Match CelestialSE / planets (IsGlobal). */
+        head.flags = Ball::Flag::IsGlobal;
     into.Append( head );
     MassSector mass = MassSector();
         mass.mass = 10000000000;    // as seen in packets
@@ -142,10 +168,13 @@ PyDict* AnomalySE::MakeSlimItem()
 {
     _log(SE__SLIMITEM, "MakeSlimItem for AnomalySE %s(%u)", GetName(), m_self->itemID());
     PyDict *slim = new PyDict();
+        slim->SetItemString("ballID",           new PyLong(m_self->itemID()));
         slim->SetItemString("itemID",           new PyLong(m_self->itemID()));
         slim->SetItemString("typeID",           new PyInt(m_self->typeID()));
         slim->SetItemString("dungeonDataID",    new PyInt(0)); //?  seen 2990651
         slim->SetItemString("ownerID",          new PyInt(m_ownerID));
+        if (m_radius > 0.0)
+            slim->SetItemString("radius",       new PyFloat(m_radius));
     return slim;
 }
 
@@ -173,7 +202,7 @@ void WormholeSE::EncodeDestiny(Buffer& into)
         head.posX = x();
         head.posY = y();
         head.posZ = z();
-        head.flags = 0;
+        head.flags = Ball::Flag::IsGlobal;
     into.Append( head );
     MassSector mass = MassSector();
         mass.mass = 10000000000;    // as seen in packets
@@ -192,9 +221,12 @@ PyDict* WormholeSE::MakeSlimItem()
 {
     _log(SE__SLIMITEM, "MakeSlimItem for WormholeSE %s(%u)", GetName(), m_self->itemID());
     PyDict *slim = new PyDict();
+        slim->SetItemString("ballID",                   new PyLong(m_self->itemID()));
         slim->SetItemString("itemID",                   new PyLong(m_self->itemID()));
         slim->SetItemString("typeID",                   new PyInt(m_self->typeID()));
         slim->SetItemString("ownerID",                  new PyInt(m_ownerID));
+        if (m_radius > 0.0)
+            slim->SetItemString("radius",               new PyFloat(m_radius));
         slim->SetItemString("otherSolarSystemClass",    new PyInt(sDataMgr.GetWHSystemClass(m_system->GetID())));
         slim->SetItemString("wormholeSize",             new PyFloat(m_wormholeSize));
         slim->SetItemString("wormholeAge",              new PyInt(m_wormholeAge));

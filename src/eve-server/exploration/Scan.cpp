@@ -35,12 +35,16 @@
 #include "system/cosmicMgrs/AnomalyMgr.h"
 
 Scan::Scan(Client* pClient)
-: m_client(pClient),
-  m_system(pClient->SystemMgr())
+: m_client(pClient)
 {
     m_probeScan = false;
     m_probeMap.clear();
     m_activeProbeMap.clear();
+}
+
+SystemManager* Scan::ClientSystem() const
+{
+    return m_client ? m_client->SystemMgr() : nullptr;
 }
 
 void Scan::AddProbe(ProbeSE* pProbe)
@@ -247,18 +251,33 @@ void Scan::ShipScanResult() {
     //  WORKING CODE...DONT FUCK WITH THIS!!  -allan 11Dec15
     /** @todo  see client code to verify what it expects, and what it can calculate */
     // client scan data found in EVE_Scanning.h
+    SystemManager* sys = ClientSystem();
+    if (sys == nullptr || !sys->IsLoaded()) {
+        _log(SCAN__WARNING, "ShipScanResult: no loaded system for %s — sending empty result (stale scan after jump/unload?)", m_client->GetName());
+        PyList* emptyList = new PyList();
+        OnSystemScanStopped osss;
+            osss.systemScanResult = emptyList;
+            osss.scanProbesDict = new PyDict();
+            osss.absentTargets = new PyList();
+        PyTuple* ev = osss.Encode();
+        m_client->SendNotification("OnSystemScanStopped", "charid", &ev);
+        return;
+    }
+
     std::vector<CosmicSignature> anom;
     if (m_client->IsShowall()) {
-        m_system->GetAllEntities(anom);
+        sys->GetAllEntities(anom);
         // bubble centers only populate when bubble markers are enabled.
-        sBubbleMgr.GetBubbleCenterMarkers(m_system->GetID(), anom);
+        sBubbleMgr.GetBubbleCenterMarkers(sys->GetID(), anom);
     } else {
-        m_system->GetAnomMgr()->GetAnomalyList(anom);
+        sys->GetAnomMgr()->GetAnomalyList(anom);
     }
 
     PyList* resultList = new PyList();
     // NOTE. cannot scan pos, wrecks, ships, mission sites, or escalations.  they DO have sigIDs, and can get to type (25%), but no farther
     for (auto anoms : anom) {
+        if (AnomalyMgr::IsExcludedFromCosmicScanResults(anoms, sys))
+            continue;
         SystemScanResult ssr;
             ssr.typeID = anoms.sigTypeID;
             ssr.scanGroupID = anoms.scanGroupID;
@@ -297,12 +316,29 @@ void Scan::ProbeScanResult()
     // this will use outline of above code, but be MUCH more complicated...
     _log(SCAN__TRACE, "Scan::ProbeScanResult()  for %s in system %u", m_client->GetName(), m_client->GetSystemID());
 
+    SystemManager* sys = ClientSystem();
+    if (sys == nullptr || !sys->IsLoaded()) {
+        _log(SCAN__WARNING, "ProbeScanResult: no loaded system for %s — sending empty result", m_client->GetName());
+        PyList* resultList = new PyList();
+        PyDict* probeDict = new PyDict();
+        PyList* absentList = new PyList();
+        OnSystemScanStopped osssp;
+            osssp.scanProbesDict = probeDict;
+            osssp.systemScanResult = resultList;
+            osssp.absentTargets = absentList;
+        PyTuple* ev = osssp.Encode();
+        m_client->SendNotification("OnSystemScanStopped", "charid", &ev);
+        return;
+    }
+
     PyList* resultList = new PyList();
     std::vector<CosmicSignature> sig, anom;
 
     // are anomalies shown in probe scan results?  config option?
-    m_system->GetAnomMgr()->GetAnomalyList(anom);
+    sys->GetAnomMgr()->GetAnomalyList(anom);
     for (auto anoms : anom) {
+        if (AnomalyMgr::IsExcludedFromCosmicScanResults(anoms, sys))
+            continue;
         SystemScanResult ssr;
             ssr.typeID = anoms.sigTypeID;
             ssr.scanGroupID = anoms.scanGroupID;
@@ -345,8 +381,10 @@ void Scan::ProbeScanResult()
         resultList->AddItem(ssr.Encode());
     }
 
-    m_system->GetAnomMgr()->GetSignatureList(sig);
+    sys->GetAnomMgr()->GetSignatureList(sig);
     for (auto sigs : sig) {
+        if (AnomalyMgr::IsExcludedFromCosmicScanResults(sigs, sys))
+            continue;
         SignalData data = SignalData();
             data.sig = sigs;
             data.probes = nullptr;
@@ -503,8 +541,14 @@ struct CosmicSignature {
         hit = false;
     }
 
-    _log(SCAN__TRACE, "Scan::GetProbeDataForSig()  probeVec size: %u for signal %s (%s)", \
-            probeVec.size(), data.sig.sigName.c_str(), m_system->GetAnomMgr()->GetScanGroupName(data.sig.scanGroupID));
+    {
+        const char* grp = "n/a";
+        SystemManager* s2 = ClientSystem();
+        if (s2 != nullptr && s2->IsLoaded() && s2->GetAnomMgr() != nullptr)
+            grp = s2->GetAnomMgr()->GetScanGroupName(data.sig.scanGroupID);
+        _log(SCAN__TRACE, "Scan::GetProbeDataForSig()  probeVec size: %u for signal %s (%s)", \
+            probeVec.size(), data.sig.sigName.c_str(), grp);
+    }
 
     if (probeVec.empty())
         return false;

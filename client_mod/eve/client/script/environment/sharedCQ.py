@@ -26,7 +26,7 @@
 #                                                  appearance=..., sculpts=...)
 #
 #   notify OnCQAvatarMove with key "charid":
-#       (charID, x, y, z, worldSpaceID, corpID, gender, bloodlineID, raceID)
+#       11-tuple: + yaw + appearanceOverride (0 = use charID for paper doll; custom CQ agents use template char)
 #
 #   notify OnCharNoLongerInStation with key "stationid":
 #       legacy nested tuple (charID, ...) -- consult Character.xmlp for the
@@ -153,7 +153,7 @@ class SharedCQClient(service.Service):
     # ----- notify handlers ---------------------------------------------------
 
     def OnCQAvatarMove(self, charID, x, y, z, worldSpaceID,
-                       corpID=0, gender=0, bloodlineID=0, raceID=0):
+                       corpID=0, gender=0, bloodlineID=0, raceID=0, yaw=0.0, appearanceOverride=0):
         # Server emits this for both Join replays (initial position) and
         # live transform updates. Spawn lazily; update if already known.
         if self.localCharID is not None and charID == self.localCharID:
@@ -163,7 +163,7 @@ class SharedCQClient(service.Service):
         if charID in self.remotes:
             self._UpdateTransform(charID, (x, y, z))
         else:
-            self._Spawn(self.sceneRef, charID, (x, y, z), gender, bloodlineID, raceID, corpID)
+            self._Spawn(self.sceneRef, charID, (x, y, z), gender, bloodlineID, raceID, corpID, appearanceOverride)
 
     def OnCharNowInStation(self, *args):
         # Legacy presence notify. The 9-tuple OnCQAvatarMove replay already
@@ -224,13 +224,13 @@ class SharedCQClient(service.Service):
         if row is None:
             return
         try:
-            if len(row) == 9:
-                charID, x, y, z, ws, corp, gender, bloodline, race = row
-            elif len(row) == 5:
+            if len(row) == 5:
                 charID, x, y, z, ws = row
                 corp = gender = bloodline = race = 0
+            elif len(row) >= 9:
+                charID, x, y, z, ws, corp, gender, bloodline, race = row[0:9]
             else:
-                log.LogWarn('[%s] snapshot row width=%d (expected 9 or 5): %r' %
+                log.LogWarn('[%s] snapshot row width=%d (expected at least 5 or 9): %r' %
                     (_LOG_TAG, len(row), row))
                 return
         except Exception as e:
@@ -239,9 +239,10 @@ class SharedCQClient(service.Service):
 
         if self.localCharID is not None and charID == self.localCharID:
             return
-        self._Spawn(self.sceneRef, charID, (x, y, z), gender, bloodline, race, corp)
+        rapp = int(row[12]) if len(row) >= 13 else 0
+        self._Spawn(self.sceneRef, charID, (x, y, z), gender, bloodline, race, corp, rapp)
 
-    def _Spawn(self, scene, charID, pos, gender, bloodlineID, raceID, corpID):
+    def _Spawn(self, scene, charID, pos, gender, bloodlineID, raceID, corpID, appearanceOverride=0):
         if charID in self.remotes:
             return
         if scene is None:
@@ -252,7 +253,8 @@ class SharedCQClient(service.Service):
             return
 
         try:
-            dollData = sm.RemoteSvc('paperDollServer').GetPaperDollDataFor(charID)
+            dollId = int(appearanceOverride) if appearanceOverride else int(charID)
+            dollData = sm.RemoteSvc('paperDollServer').GetPaperDollDataFor(dollId)
         except Exception as e:
             log.LogException('[%s] GetPaperDollDataFor(%s): %s' % (_LOG_TAG, charID, e))
             dollData = None

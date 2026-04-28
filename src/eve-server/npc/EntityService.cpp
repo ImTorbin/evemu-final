@@ -21,6 +21,31 @@
 #include "services/ServiceManager.h"
 
 namespace {
+
+/** In-space position for range checks — delegates to SystemEntity::GetAuthPosition(). */
+GPoint AuthPosition(SystemEntity* se)
+{
+    if (se == nullptr)
+        return GPoint();
+    return se->GetAuthPosition();
+}
+
+/**
+ * Drone command range (meters). AttrDroneControlDistance (458) is often seeded in km in SDE-derived DBs
+ * (e.g. 20 meaning 20 km); comparing that to meter distances makes every target look "outside range".
+ */
+float EffectiveDroneCommandRange(ShipItemRef shipItem)
+{
+    if (shipItem.get() == nullptr)
+        return 20000.f;
+    float r = shipItem->GetAttribute(AttrDroneControlDistance).get_float();
+    if (!std::isfinite(r) || r <= 0.f)
+        return 20000.f;
+    if (r >= 1.f && r <= 200.f)
+        r *= 1000.f;
+    return r;
+}
+
 bool GetDroneIDs(PyList* droneIDs, std::vector<uint32>& out) {
     if (droneIDs == nullptr)
         return false;
@@ -206,9 +231,8 @@ PyResult EntityBound::CmdEngage(PyCallArgs &call, PyList* droneIDs, PyInt* targe
         return new PyDict();
     }
 
-    // Keep command range validation simple and server-authoritative.
-    const float commandRange = call.client->GetShip()->GetAttribute(AttrDroneControlDistance).get_float();
-    if (call.client->GetShipSE()->GetPosition().distance(pTarget->GetPosition()) > commandRange) {
+    const float commandRange = EffectiveDroneCommandRange(call.client->GetShip());
+    if (AuthPosition(call.client->GetShipSE()).distance(AuthPosition(pTarget)) > commandRange) {
         call.client->SendNotifyMsg("The drones fail to execute your command because the target is outside your drone command range.");
         return new PyDict();
     }
@@ -298,8 +322,8 @@ PyResult EntityBound::CmdMine(PyCallArgs &call, PyList* droneIDs, PyInt* targetI
         return new PyDict();
     }
 
-    const float commandRange = call.client->GetShip()->GetAttribute(AttrDroneControlDistance).get_float();
-    if (call.client->GetShipSE()->GetPosition().distance(pTarget->GetPosition()) > commandRange) {
+    const float commandRange = EffectiveDroneCommandRange(call.client->GetShip());
+    if (AuthPosition(call.client->GetShipSE()).distance(AuthPosition(pTarget)) > commandRange) {
         call.client->SendNotifyMsg("The target is outside your drone command range.");
         return new PyDict();
     }
@@ -348,8 +372,8 @@ PyResult EntityBound::CmdMineRepeatedly(PyCallArgs &call, PyList* droneIDs, PyIn
         return new PyDict();
     }
 
-    const float commandRange = call.client->GetShip()->GetAttribute(AttrDroneControlDistance).get_float();
-    if (call.client->GetShipSE()->GetPosition().distance(pTarget->GetPosition()) > commandRange) {
+    const float commandRange = EffectiveDroneCommandRange(call.client->GetShip());
+    if (AuthPosition(call.client->GetShipSE()).distance(AuthPosition(pTarget)) > commandRange) {
         call.client->SendNotifyMsg("The target is outside your drone command range.");
         return new PyDict();
     }
@@ -470,7 +494,7 @@ PyResult EntityBound::CmdReturnBay(PyCallArgs &call, PyList* droneIDs) {
         if ((pDrone == nullptr) or (pDrone->GetOwner() != call.client))
             continue;
 
-        const double distance = pShipSE->GetPosition().distance(pDrone->GetPosition());
+        const double distance = pShipSE->GetAuthPosition().distance(pDrone->GetAuthPosition());
         if (distance > kDroneScoopDistance) {
             // Move drone toward the controlling ship; scoop will occur once it is close enough.
             pDrone->SetTarget(nullptr);

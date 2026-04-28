@@ -37,6 +37,12 @@ public:
     PyRep* GetPaperDollPortraitData(uint32 charID) const;
     PyRep* GetPaperDollAvatarSculpts(uint32 charID) const;
 	PyRep* GetPaperDollAvatarModifiers(uint32 charID) const;
+
+    /**
+     * For NPCs without avatar_modifiers, pick another character that has a full doll.
+     * @param excludeDonorCharID If non-zero, avoid using this character as donor (e.g. viewing client) so NPCs are not clones of you when other donors exist.
+     */
+    uint32 ResolvePaperDollSourceCharID(uint32 characterID, uint32 excludeDonorCharID = 0) const;
 };
 
 #endif

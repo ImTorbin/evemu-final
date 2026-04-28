@@ -34,7 +34,10 @@ protected:
     PyResult GetInfoServiceDetails(PyCallArgs& call);
     PyResult DoAction(PyCallArgs& call, std::optional <PyInt*> actionID);
     PyResult GetMissionBriefingInfo(PyCallArgs& call);
-    PyResult GetMissionKeywords(PyCallArgs& call, PyInt* contentID);
+    // Up to 6 optional int tuple slots: Callable only matches when tuple->size() <= arg count.
+    // A single optional rejected 2+ args; Crucible may pass (contentID, …) and dispatch failed silently.
+    PyResult GetMissionKeywords(PyCallArgs& call, std::optional<PyInt*> a, std::optional<PyInt*> b,
+        std::optional<PyInt*> c, std::optional<PyInt*> d, std::optional<PyInt*> e, std::optional<PyInt*> f);
     PyResult GetMissionObjectiveInfo(PyCallArgs& call, std::optional <PyInt*> characterID, std::optional <PyInt*> contentID);
     PyResult GetMyJournalDetails(PyCallArgs& call);
     PyResult GetMissionJournalInfo(PyCallArgs &call, std::optional <PyInt*> characterID, std::optional <PyInt*> contentID);

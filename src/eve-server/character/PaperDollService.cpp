@@ -27,6 +27,23 @@
 
 
 #include "character/PaperDollService.h"
+#include "ServiceDB.h"
+
+namespace {
+PyResult NewPaperDollDataKeyVal(PaperDollDB& db, uint32 reqCharacterID, uint32 excludeDonorCharID) {
+    ServiceDB::EnsureRandomMissionAgentPaperDollInDb(reqCharacterID);
+    const uint32 src = db.ResolvePaperDollSourceCharID(reqCharacterID, excludeDonorCharID);
+    if (src != reqCharacterID) {
+        sLog.Cyan("PaperDoll", "[PaperDoll] doll bundle req=%u -> dollSource=%u (template/donor)", reqCharacterID, src);
+    }
+    PyDict* args = new PyDict;
+    args->SetItemString("colors",     db.GetPaperDollAvatarColors(src));
+    args->SetItemString("modifiers",  db.GetPaperDollAvatarModifiers(src));
+    args->SetItemString("appearance", db.GetPaperDollAvatar(src));
+    args->SetItemString("sculpts",    db.GetPaperDollAvatarSculpts(src));
+    return new PyObject("util.KeyVal", args);
+}
+} // namespace
 
 PaperDollService::PaperDollService() :
     Service("paperDollServer", eAccessLevel_Character)
@@ -43,9 +60,13 @@ PaperDollService::PaperDollService() :
 //17:35:32 L PaperDollService::Handle_GetPaperDollData(): size=1
 PyResult PaperDollService::GetPaperDollData(PyCallArgs &call, PyInt* characterID) {
     call.Dump(PLAYER__CALL_DUMP);
-    // this is called when viewing full body of a character.
-
-    return m_db.GetPaperDollAvatarColors(characterID->value());
+    if (characterID == nullptr) {
+        sLog.Error("PaperDoll", "[PaperDoll] GetPaperDollData: null characterID from char=%u",
+            call.client != nullptr ? call.client->GetCharacterID() : 0u);
+        return PyStatic.NewNone();
+    }
+    const uint32 viewerID = (call.client != nullptr) ? call.client->GetCharacterID() : 0u;
+    return NewPaperDollDataKeyVal(m_db, static_cast<uint32>(characterID->value()), viewerID);
 }
 
 PyResult PaperDollService::ConvertAndSavePaperDoll(PyCallArgs &call) {
@@ -93,7 +114,11 @@ PyResult PaperDollService::GetPaperDollPortraitDataFor(PyCallArgs &call, PyInt* 
                 params = self.GetControlParametersFromPoseData(portraitData, fromDB=True).values()
                 self.characterSvc.SetControlParametersFromList(params, charID)
     */
-    return m_db.GetPaperDollPortraitData(characterID->value());
+    const uint32 reqID = static_cast<uint32>(characterID->value());
+    const uint32 viewerID = (call.client != nullptr) ? call.client->GetCharacterID() : 0u;
+    ServiceDB::EnsureRandomMissionAgentPaperDollInDb(reqID);
+    const uint32 charID = m_db.ResolvePaperDollSourceCharID(reqID, viewerID);
+    return m_db.GetPaperDollPortraitData(charID);
 }
 
 PyResult PaperDollService::GetMyPaperDollData(PyCallArgs &call, PyInt* characterID)
@@ -124,13 +149,7 @@ PyResult PaperDollService::GetPaperDollDataFor(PyCallArgs &call, PyInt* characte
         return PyStatic.NewNone();
     }
 
-    const uint32 charID = static_cast<uint32>(characterID->value());
-
-    PyDict* args = new PyDict;
-    args->SetItemString("colors",     m_db.GetPaperDollAvatarColors(charID));
-    args->SetItemString("modifiers",  m_db.GetPaperDollAvatarModifiers(charID));
-    args->SetItemString("appearance", m_db.GetPaperDollAvatar(charID));
-    args->SetItemString("sculpts",    m_db.GetPaperDollAvatarSculpts(charID));
-
-    return new PyObject("util.KeyVal", args);
+    const uint32 reqID = static_cast<uint32>(characterID->value());
+    const uint32 viewerID = (call.client != nullptr) ? call.client->GetCharacterID() : 0u;
+    return NewPaperDollDataKeyVal(m_db, reqID, viewerID);
 }

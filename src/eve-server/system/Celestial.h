@@ -101,6 +101,7 @@ public:
     virtual bool                IsCelestialSE()         { return true; }
 
     /* SystemEntity interface */
+    virtual void                EncodeDestiny(Buffer& into);
     virtual void                MakeDamageState(DoDestinyDamageState &into);
 
 };

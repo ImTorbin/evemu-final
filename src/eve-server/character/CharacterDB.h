@@ -125,6 +125,7 @@ public:
     PyRep *GetCharPublicInfo(uint32 charID);
     PyRep *GetCharPublicInfo3(uint32 charID);
     PyRep *GetCharPrivateInfo(uint32 charID);
+    static bool IsMissionAgent(uint32 characterID);
 
     //PyObject *GetAgentPublicInfo(uint32 agentID);
     PyRep *GetOwnerNoteLabels(uint32 charID);
@@ -224,7 +225,7 @@ public:
     PyRep*      GetTopBounties();
     void        AddBounty(uint32 charID, uint32 ownerID, uint32 amount);
 
-    PyRep*      GetKillOrLoss(uint32 charID);
+    PyRep*      GetKillOrLoss(uint32 charID, uint32 limit = 200, uint32 offset = 0);
 
     static void SetCorpRole(uint32 charID, int64 role);
     static int64 GetCorpRole(uint32 charID);
@@ -294,3 +295,4 @@ public:
 };
 
 #endif
+

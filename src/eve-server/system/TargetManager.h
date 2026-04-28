@@ -136,6 +136,9 @@ public:
     bool                CanAttack()                     { return m_canAttack; }
     bool                HasNoTargets() const            { return m_targets.empty(); }
 
+    /** If warp scramble attr is set but no targeter is within range, clear it (stale dogma / desync). */
+    void                ClearStaleWarpScramble(double maxTackleRangeM);
+
     /* PC Module Methods (for module deactivation on target removed) */
     void                Destroyed();    // this does NOT remove target from targeters map
     // only called by MiningLaser

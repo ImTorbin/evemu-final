@@ -109,9 +109,6 @@ PyResult ScanBound::ConeScan( PyCallArgs& call, PyRep* ignored1, PyRep* ignored2
     if (pDestiny == nullptr) {
         codelog(CLIENT__ERROR, "%s: Client has no destiny manager!", m_client->GetName());
         return PyStatic.NewNone();
-    } else if (pDestiny->IsWarping()) {
-        call.client->SendNotifyMsg( "You can't scan while warping");
-        return PyStatic.NewNone();
     }
 
     if (m_client->GetShipSE()->SysBubble() == nullptr)
@@ -132,9 +129,6 @@ PyResult ScanBound::RequestScans(PyCallArgs& call, std::optional <PyDict*> probe
     DestinyManager* pDestiny = m_client->GetShipSE()->DestinyMgr();
     if (pDestiny == nullptr) {
         codelog(CLIENT__ERROR, "%s: Client has no destiny manager!", call.client->GetName());
-        return PyStatic.NewNone();
-    } else if (pDestiny->IsWarping()) {
-        call.client->SendNotifyMsg( "You can't scan while warping");
         return PyStatic.NewNone();
     }
 

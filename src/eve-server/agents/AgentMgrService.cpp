@@ -143,11 +143,11 @@ PyResult AgentMgrService::GetMyJournalDetails(PyCallArgs &call) {
         PyTuple* mData = new PyTuple(9);
         mData->SetItem(0, new PyInt(cur.stateID)); //missionState  .. these may be wrong also.
         mData->SetItem(1, new PyInt(cur.important?1:0)); //importantMission  -- integer boolean
-        mData->SetItem(2, new PyString(sMissionDataMgr.GetTypeLabel(cur.typeID))); //missionTypeLabel
+        mData->SetItem(2, new PyString(sMissionDataMgr.GetTypeLabelForAgent(cur.agentID, cur.typeID))); //missionTypeLabel
         mData->SetItem(3, new PyString(cur.name)); //missionName
         mData->SetItem(4, new PyInt(cur.agentID)); //agentID
         mData->SetItem(5, new PyLong(cur.expiryTime)); //expirationTime
-        mData->SetItem(6, cur.bookmarks->Clone()); //bookmarks -- if populated, this is PyList of PyDicts as defined below...
+        mData->SetItem(6, cur.bookmarks ? cur.bookmarks->Clone() : new PyList());
         mData->SetItem(7, new PyBool(cur.remoteOfferable)); //remoteOfferable
         mData->SetItem(8, new PyBool(cur.remoteCompletable)); //remoteCompletable
         missions->AddItem(mData);

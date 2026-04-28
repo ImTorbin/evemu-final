@@ -85,6 +85,11 @@ protected:
     void                UpdateCharge(uint16 attrID, uint16 testAttrID, uint16 srcAttrID, InventoryItemRef iRef);
     void                UpdateDamage(uint16 attrID, uint16 srcAttrID, InventoryItemRef iRef);
 
+    /** Energy nosferatu: drain from target capacitor, add to activating ship (capped). */
+    void                ApplyEnergyVampireDrain();
+    /** Energy neutralizer: remove capacitor from target only. */
+    void                ApplyEnergyNeutralizerDrain();
+
     /* for linked weapons */
     void                SetSlaveData(ShipSE* pShip);
 

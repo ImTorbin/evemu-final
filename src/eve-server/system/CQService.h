@@ -26,7 +26,14 @@ protected:
     PyResult JoinSharedQuarters(PyCallArgs& call);
     PyResult LeaveSharedQuarters(PyCallArgs& call);
     PyResult GetSnapshot(PyCallArgs& call);
-    PyResult UpdateTransform(PyCallArgs& call, PyFloat* x, PyFloat* y, PyFloat* z);
+    PyResult UpdateTransform(PyCallArgs& call, PyFloat* x, PyFloat* y, PyFloat* z, PyFloat* yaw);
+    PyResult SetActionState(PyCallArgs& call, PyInt* actionObjectUID, PyInt* actionStationIdx);
+    PyResult PlayEmote(PyCallArgs& call, PyInt* emoteIndex);
+    /// Dev / GMH+QA+programmer: register a CQ static agent at your last streamed position (uses captainsQuartersSvc bound session).
+    PyResult CQDebugRegisterAgentHere(PyCallArgs& call, PyInt* appearanceCharID);
+    PyResult CQDebugUpdateAgentHere(PyCallArgs& call, PyInt* instanceCharID);
+    PyResult CQDebugSetAgentTransform(PyCallArgs& call, PyInt* instanceCharID, PyFloat* x, PyFloat* y, PyFloat* z, PyFloat* yaw);
+    PyResult CQDebugDeleteAgent(PyCallArgs& call, PyInt* instanceCharID);
 
 private:
     uint32 m_worldSpaceID;

@@ -46,6 +46,17 @@
  *  variant was even worse, using `|v_target|` (absolute target speed, ignoring the
  *  shooter's frame entirely).
  *
+ *  Expanded tracking-only exponent (same as ((angVel/trackSpeed)*(sigRes/targSig))^2 ):
+ *      ((transversal/distance)/trackSpeed * sigRes/targSig)^2
+ *      = ( transversal * sigRes / (distance * trackSpeed * targSig) )^2
+ *
+ *  Informal summaries sometimes combine terms into one fraction with "angular velocity",
+ *  signature radius, tracking speed, and range. If angular velocity is already
+ *  transversal/range (rad/s), any extra division by range in that combined form
+ *  double-counts distance (denominator effectively includes range^2 for the tracking
+ *  term). This implementation keeps angVel = transversal/distance and multiplies by
+ *  sigRes/targSig separately, matching the usual EVE separation; see GetToHit().
+ *
  *  ComputeTransversal() below returns the correct perpendicular component.
  */
 namespace {
@@ -103,13 +114,13 @@ float TurretFormulas::GetToHit(ShipItemRef shipRef, TurretModule* pMod, SystemEn
     uint32 falloff = pMod->GetAttribute(AttrFalloff).get_uint32();
     const float falloffF = static_cast<float>(std::max(falloff, 1u)); // zero falloff -> inf in (d/falloff)^2
     uint32 range   = pMod->GetAttribute(AttrMaxRange).get_uint32();
-    float  distance = pShipSE->GetPosition().distance(pTarget->DestinyMgr()->GetPosition());
+    float  distance = static_cast<float>(pShipSE->GetAuthPosition().distance(pTarget->GetAuthPosition()));
     if (distance < 0.001f)
         distance = 0.001f;
 
     const float transversalV = ComputeTransversal(
-        pShipSE->GetPosition(), pShipSE->GetVelocity(),
-        pTarget->DestinyMgr()->GetPosition(), pTarget->GetVelocity());
+        pShipSE->GetAuthPosition(), pShipSE->GetVelocity(),
+        pTarget->GetAuthPosition(), pTarget->GetVelocity());
     const float angularVel = transversalV / distance;
 
     float targSig = GetEffectiveTargetSignature(pTarget);
@@ -176,7 +187,7 @@ float TurretFormulas::GetNPCToHit(NPC* pNPC, SystemEntity* pTarget)
     uint16 range   = pNPC->GetAIMgr()->GetOptimalRange();
     uint32 falloff = pNPC->GetAIMgr()->GetFalloff();
     const float falloffF = static_cast<float>(std::max(falloff, 1u)); // Belt NPCs often have AttrFalloff 0 in DB
-    float  distance = pNPC->DestinyMgr()->GetPosition().distance(pTarget->DestinyMgr()->GetPosition());
+    float  distance = static_cast<float>(pNPC->GetAuthPosition().distance(pTarget->GetAuthPosition()));
     if (distance < 0.001f)
         distance = 0.001f;
     float trackSpeed = pNPC->GetAIMgr()->GetTrackingSpeed();
@@ -189,8 +200,8 @@ float TurretFormulas::GetNPCToHit(NPC* pNPC, SystemEntity* pTarget)
         sigRes = 1.0f;
 
     const float transversalV = ComputeTransversal(
-        pNPC->DestinyMgr()->GetPosition(), pNPC->GetVelocity(),
-        pTarget->DestinyMgr()->GetPosition(), pTarget->GetVelocity());
+        pNPC->GetAuthPosition(), pNPC->GetVelocity(),
+        pTarget->GetAuthPosition(), pTarget->GetVelocity());
     const float angularVel = transversalV / distance;
 
     _log(DAMAGE__TRACE_NPC, "NPC::GetToHit - distance:%.2f, range:%u, falloff:%u", distance, range, falloff);
@@ -237,7 +248,7 @@ float TurretFormulas::GetDroneToHit(DroneSE* pDrone, SystemEntity* pTarget)
     float falloff = droneSelf->GetAttribute(AttrFalloff).get_float();
     if (falloff < 0.0001f)
         falloff = 0.0001f;
-    float distance = pDrone->DestinyMgr()->GetPosition().distance(pTarget->DestinyMgr()->GetPosition());
+    float distance = static_cast<float>(pDrone->GetAuthPosition().distance(pTarget->GetAuthPosition()));
     if (distance < 0.001f)
         distance = 0.001f;
     float tracking = droneSelf->GetAttribute(AttrTrackingSpeed).get_float();
@@ -251,8 +262,8 @@ float TurretFormulas::GetDroneToHit(DroneSE* pDrone, SystemEntity* pTarget)
         sigRes = 1.0f;
 
     const float transversalV = ComputeTransversal(
-        pDrone->DestinyMgr()->GetPosition(), pDrone->GetVelocity(),
-        pTarget->DestinyMgr()->GetPosition(), pTarget->GetVelocity());
+        pDrone->GetAuthPosition(), pDrone->GetVelocity(),
+        pTarget->GetAuthPosition(), pTarget->GetVelocity());
     const float angularVel = transversalV / distance;
 
     // Original drone formula (no sig-mismatch damage-reduction branch -- keep existing behaviour).
@@ -286,7 +297,7 @@ float TurretFormulas::GetSentryToHit(Sentry* pSentry, SystemEntity* pTarget)
     float falloff = sentrySelf->GetAttribute(AttrFalloff).get_float();
     if (falloff < 0.0001f)
         falloff = 0.0001f;
-    float distance = pSentry->GetPosition().distance(pTarget->DestinyMgr()->GetPosition());
+    float distance = static_cast<float>(pSentry->GetAuthPosition().distance(pTarget->GetAuthPosition()));
     if (distance < 0.001f)
         distance = 0.001f;
     float tracking = sentrySelf->GetAttribute(AttrTrackingSpeed).get_float();
@@ -302,8 +313,8 @@ float TurretFormulas::GetSentryToHit(Sentry* pSentry, SystemEntity* pTarget)
     // framework-correct and consistent with the other shooter types (and future-proof
     // for any movable deployable variants).
     const float transversalV = ComputeTransversal(
-        pSentry->GetPosition(), pSentry->GetVelocity(),
-        pTarget->DestinyMgr()->GetPosition(), pTarget->GetVelocity());
+        pSentry->GetAuthPosition(), pSentry->GetVelocity(),
+        pTarget->GetAuthPosition(), pTarget->GetVelocity());
     const float angularVel = transversalV / distance;
 
     float a = (angularVel / tracking);

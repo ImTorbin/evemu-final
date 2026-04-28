@@ -42,6 +42,8 @@ boolean can use either 0/1 OR true/false.
         <ServerSleepTime>10</ServerSleepTime><!-- ms -->
         <maxPlayers>250</maxPlayers>
         <idleSleepTime>1000</idleSleepTime><!-- in ms (1 sec default) -->
+        <!-- Non-pilot ship motion (rats, drones orbiting/FOLLOW/GOTO): tick interval ms. Lower = smoother (~17≈58/s, legacy 50≈20/s). Clamp 10–100. -->
+        <DynamicDestinyMs>17</DynamicDestinyMs>
         <processTic>1.0</processTic><!-- used to slow down server process tics.  <1.0 is faster, >1.0 slower -->
         <MaxThreadReport>10</MaxThreadReport>
         <DisableIGB>false</DisableIGB>
@@ -142,7 +144,7 @@ boolean can use either 0/1 OR true/false.
     </bpTimes>
 
     <character>
-        <startBalance>5000000.0</startBalance>
+        <startBalance>10000000.0</startBalance>
         <startAurBalance>600.0</startAurBalance>
         <startStation>0</startStation><!-- stationID of character starting station.  '0' to use default based on race -->
         <startSecRating>1.0</startSecRating>
@@ -170,6 +172,8 @@ boolean can use either 0/1 OR true/false.
         <TargetPod>false</TargetPod><!-- bool   npc target/attack pod -->
         <TargetPodSec>0</TargetPodSec><!-- npc target/attack pod in truSec lower than this  -->
         <ThreatRadius>1.0</ThreatRadius> <!-- used in conjunction with npc ai target switching -->
+        <!-- false (default): use CmdFollowBall at optimal range while Engaged — straighter kinematics vs ring orbit. true: legacy orbit-on-engage -->
+        <EngagedUseOrbit>false</EngagedUseOrbit>
     </npc>
 
     <standings><!-- these are in percent. do not modify.  not fully debugged -->
@@ -221,6 +225,9 @@ boolean can use either 0/1 OR true/false.
         <Radar>6</Radar><!-- integer  -1 to disable.  max 128.  default 6 -->
         <Unrated>8</Unrated><!-- integer  -1 to disable.  max 128.  default 8 -->
         <Complex>4</Complex><!-- integer  -1 to disable.  max 128.  default 4 -->
+        <EscalationChance>0.35</EscalationChance><!-- float 0..1 chance after clearing anomaly/unrated dungeon NPCs -->
+        <AnomalyCombatWaves>12</AnomalyCombatWaves><!-- max regular waves per site; capped 1–12; full profiles need 9 for Sanctum -->
+        <AnomalyCommanderChance>0.25</AnomalyCommanderChance><!-- 0..1 extra commander wave after regular waves -->
     </exploring>
 
     <testing><!-- switches for various incomplete/testing code sections -->
@@ -257,6 +264,20 @@ boolean can use either 0/1 OR true/false.
         <ConsoleThreads>1</ConsoleThreads>
     </threads>
 
+    <!-- Optional Discord webhooks (HTTPS POST; requires libcurl when building eve-server). URLs are secrets — keep out of public logs. -->
+    <discord>
+        <enabled>true</enabled>
+        <webhookRareLootURL>https://discord.com/api/webhooks/1498689761475559505/6A7DpTn8wlmmwmUlhSPEcQbL_u9ZKMsAhDa9omHV46hn5yRmnyMuCzH4vVvFEc5WgAbM</webhookRareLootURL>
+        <webhookExpensiveDeathURL>https://discord.com/api/webhooks/1498690126132412668/KFxrZyoVMHIZcKcrzGfh_biWZENIju-aF4jLvmNeKJniZNyu69fPeljzcdDZYmPkULO0</webhookExpensiveDeathURL>
+        <webhookServerUpURL>https://discord.com/api/webhooks/1498689843734118413/CYn10_1vCLEyH63TJicy1GznqAh-hB-JrsZQBDtnD54U6GL_xl3Wh3eFmce-A7988t5P</webhookServerUpURL>
+        <!-- Rare wreck webhook fires when meta level > this (default 5). -->
+        <rareLootMetaGt>5</rareLootMetaGt>
+        <minExpensiveDeathEstimatedISK>20</minExpensiveDeathEstimatedISK>
+        <cooldownRareLootSeconds>30</cooldownRareLootSeconds>
+        <cooldownExpensiveDeathSeconds>60</cooldownExpensiveDeathSeconds>
+        <lootOnlyPlayerShipKills>false</lootOnlyPlayerShipKills>
+    </discord>
+
     <database>
         <host>database_host</host><!--  must be 'localhost' for socket connection -->
         <username>database_username</username>
@@ -281,8 +302,15 @@ boolean can use either 0/1 OR true/false.
 
     <net>
         <port>26000</port>
-        <!-- Set to IP address which CLIENT can use to access port 26001 on server. -->
-        <imageServer>127.0.0.1</imageServer>
+        <!--
+        Hamachi / remote testing (friend connects to YOUR Hamachi IPv4, e.g. 25.11.147.190:26000):
+        - imageServer MUST be that same IP so the client can load portraits (HTTP on imageServerPort).
+        - listenAddress: leave EMPTY to bind 0.0.0.0 (works for native Windows and for Docker; friend still uses your Hamachi IP).
+        - OR set listenAddress to your Hamachi IP ONLY when running eve-server.exe directly on Windows (not Docker) to listen on that interface only.
+        Docker: listenAddress MUST be empty inside the container; publish ports 26000/26001 on the host and set imageServer to the host's Hamachi IP.
+        -->
+        <listenAddress></listenAddress>
+        <imageServer>25.11.147.190</imageServer>
         <imageServerPort>26001</imageServerPort>
     </net>
 

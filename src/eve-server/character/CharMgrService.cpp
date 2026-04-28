@@ -175,8 +175,14 @@ PyResult CharMgrService::GetImageServerLink(PyCallArgs& call)
 }
 
 PyResult CharMgrService::GetRecentShipKillsAndLosses(PyCallArgs& call, PyInt* num, std::optional<PyInt*> startIndex)
-{   /* cached object - can return db object as DBResultToCRowset*/
-    return m_db.GetKillOrLoss(call.client->GetCharacterID());
+{
+    uint32 limit = static_cast<uint32>(num->value());
+    uint32 offset = 0;
+    if (startIndex.has_value() && startIndex.value() != nullptr)
+        offset = static_cast<uint32>(startIndex.value()->value());
+    _log(CHARACTER__INFO, "GetRecentShipKillsAndLosses: char %u limit %u offset %u (feeds kill list / CombatLog).",
+         call.client->GetCharacterID(), limit, offset);
+    return m_db.GetKillOrLoss(call.client->GetCharacterID(), limit, offset);
 }
 
 PyResult CharMgrService::GetTopBounties(PyCallArgs& call)

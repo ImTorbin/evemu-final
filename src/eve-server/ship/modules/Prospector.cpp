@@ -226,7 +226,7 @@ void Prospector::DropSalvage()
                         locTemp,
                         flagNone,
                         "Jettisoned Loot Container",
-                        m_targetSE->GetPosition());
+                        m_targetSE->GetAuthPosition());
 
         CargoContainerRef jetCanRef = sItemFactory.SpawnCargoContainer(p_idata);
         if (jetCanRef.get() != nullptr) {

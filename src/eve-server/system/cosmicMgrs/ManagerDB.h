@@ -91,6 +91,8 @@ public:
 
     /* anomaly manager */
     void SaveAnomaly(CosmicSignature& sig);
+    /** Remove persisted signature row for a dungeon anchor / cosmic item (no-op if none). */
+    void DeleteSignatureBySigItemID(uint32 sigItemID);
     void GetAnomalyList(DBQueryResult& res);
     void GetAnomaliesBySystem(uint32 systemID, DBQueryResult& res);
     void GetSystemAnomalies(uint32 systemID, DBQueryResult& res);

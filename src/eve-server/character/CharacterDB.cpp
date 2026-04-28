@@ -463,9 +463,56 @@ PyRep *CharacterDB::GetCharSelectInfo(uint32 characterID) {
     return DBResultToCRowset(res);
 }
 
+bool CharacterDB::IsMissionAgent(uint32 characterID) {
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res, "SELECT 1 FROM agtAgents WHERE agentID = %u LIMIT 1", characterID)) {
+        codelog(DATABASE__ERROR, "Error in IsMissionAgent query: %s", res.error.c_str());
+        return false;
+    }
+    DBResultRow row;
+    return res.GetRow(row);
+}
+
 PyRep *CharacterDB::GetCharPublicInfo(uint32 characterID) {
+    if (IsMissionAgent(characterID)) {
+        DBQueryResult res;
+        if (!sDatabase.RunQuery(res,
+            "SELECT "
+            "  ch.typeID, "
+            "  ch.characterName, "
+            "  COALESCE(agt.corporationID, ch.corporationID) AS corporationID, "
+            "  IFNULL(cbl.raceID, 0) AS raceID, "
+            "  IFNULL(bl.bloodlineID, 0) AS bloodlineID, "
+            "  ch.ancestryID, "
+            "  ch.careerID, "
+            "  ch.schoolID, "
+            "  IFNULL(cs.schoolNameID, 0) AS schoolNameID, "
+            "  ch.careerSpecialityID, "
+            "  0 AS age, "
+            "  ch.createDateTime, "
+            "  ch.gender, "
+            "  ch.characterID, "
+            "  ch.description, "
+            "  IFNULL(ch.createDateTime, 0) AS startDateTime "
+            " FROM chrNPCCharacters AS ch "
+            "  INNER JOIN agtAgents AS agt ON agt.agentID = ch.characterID "
+            "  LEFT JOIN bloodlineTypes AS bl ON bl.typeID = ch.typeID "
+            "  LEFT JOIN chrBloodlines AS cbl ON cbl.bloodlineID = bl.bloodlineID "
+            "  LEFT JOIN chrSchools AS cs ON cs.schoolID = ch.schoolID "
+            " WHERE ch.characterID = %u", characterID))
+        {
+            codelog(DATABASE__ERROR, "Error in GetCharPublicInfo (mission agent) query: %s", res.error.c_str());
+            return nullptr;
+        }
+        DBResultRow row;
+        if (!res.GetRow(row)) {
+            codelog(DATABASE__ERROR, "Error in GetCharPublicInfo: no data for mission agent %u", characterID);
+            return nullptr;
+        }
+        return DBRowToKeyVal(row);
+    }
     if (IsAgent(characterID)) {
-        sLog.Error("CharacterDB::GetCharPublicInfo()", "Character %u is NPC.", characterID);
+        sLog.Error("CharacterDB::GetCharPublicInfo()", "Character %u is legacy NPC (not a mission agent row).", characterID);
         return nullptr;
     }
     DBQueryResult res;
@@ -508,7 +555,7 @@ PyRep *CharacterDB::GetCharPublicInfo(uint32 characterID) {
 bool CharacterDB::GetCharacterData(uint32 characterID, CharacterData &into) {
     DBQueryResult res;
 
-    if (IsAgent(characterID)) {
+    if (IsMissionAgent(characterID) || IsAgent(characterID)) {
         if (!sDatabase.RunQuery(res,
             "SELECT"
             "   0 as accountID,"
@@ -520,10 +567,10 @@ bool CharacterDB::GetCharacterData(uint32 characterID, CharacterData &into) {
             "   0 as aurBalance,"
             "   securityRating,"
             "   0 as logonMinutes,"
-            "   stationID,"
-            "   solarSystemID,"
-            "   constellationID,"
-            "   regionID,"
+            "   COALESCE(NULLIF(chr.stationID,0), NULLIF(agt.locationID,0)) AS stationID,"
+            "   chr.solarSystemID,"
+            "   chr.constellationID,"
+            "   chr.regionID,"
             "   ancestryID,"
             "   0 AS bloodlineID,"      /** @todo fix these */
             "   0 AS raceID,"
@@ -538,7 +585,8 @@ bool CharacterDB::GetCharacterData(uint32 characterID, CharacterData &into) {
             "   0 AS skillPoints,"
             "   typeID"
             " FROM chrNPCCharacters AS chr"
-            " WHERE characterID = %u", characterID)) {
+            " LEFT JOIN agtAgents AS agt ON agt.agentID = chr.characterID"
+            " WHERE chr.characterID = %u", characterID)) {
             codelog(DATABASE__ERROR, "Error in GetCharacter query: %s", res.error.c_str());
             return false;
             }
@@ -597,6 +645,29 @@ bool CharacterDB::GetCharacterData(uint32 characterID, CharacterData &into) {
     into.stationID = row.GetUInt( 9 );
     into.solarSystemID = row.GetUInt( 10 );
     into.locationID = (into.stationID == 0 ? into.solarSystemID : into.stationID);
+    if (into.locationID == 0 && (IsMissionAgent(characterID) || IsAgent(characterID))) {
+        DBQueryResult resLoc;
+        if (sDatabase.RunQuery(resLoc,
+            "SELECT COALESCE(NULLIF(crp.stationID,0), NULLIF(ch.solarSystemID,0))"
+            " FROM chrNPCCharacters ch"
+            " LEFT JOIN agtAgents ag ON ag.agentID = ch.characterID"
+            " LEFT JOIN crpCorporation crp ON crp.corporationID = ag.corporationID"
+            " WHERE ch.characterID = %u",
+            characterID))
+        {
+            DBResultRow lr;
+            if (resLoc.GetRow(lr) && !lr.IsNull(0)) {
+                const uint32 lid = lr.GetUInt(0);
+                if (lid != 0) {
+                    into.locationID = lid;
+                    if (sDataMgr.IsStation(lid) && into.stationID == 0)
+                        into.stationID = lid;
+                    if (sDataMgr.IsSolarSystem(lid) && into.solarSystemID == 0)
+                        into.solarSystemID = lid;
+                }
+            }
+        }
+    }
     into.constellationID = row.GetUInt( 11 );
     into.regionID = row.GetUInt( 12 );
     into.ancestryID = row.GetUInt( 13 );
@@ -620,7 +691,7 @@ bool CharacterDB::GetCharCorpData(uint32 characterID, CorpData &into) {
     DBQueryResult res;
     DBResultRow row;
 
-    if (IsAgent(characterID)) {
+    if (IsMissionAgent(characterID) || IsAgent(characterID)) {
         into.corpAccountKey = 1001;
 
         if (!sDatabase.RunQuery(res,
@@ -709,6 +780,9 @@ bool CharacterDB::GetCharCorpData(uint32 characterID, CorpData &into) {
     into.name = row.GetText(4);
     into.ticker = row.GetText(5);
 
+    if (into.baseID == 0 && into.corpHQ != 0)
+        into.baseID = into.corpHQ;
+
     return true;
 }
 
@@ -789,6 +863,23 @@ void CharacterDB::GetCharacterDataMap(uint32 charID, std::map<std::string, int64
 PyRep* CharacterDB::GetCharPublicInfo3(uint32 charID) {
     // bounty, title, startDateTime, description, corporationID
     DBQueryResult res;
+    if (IsMissionAgent(charID)) {
+        if (!sDatabase.RunQuery(res,
+            "SELECT "
+            "  ch.bounty, "
+            "  ch.title, "
+            "  ch.createDateTime AS startDateTime, "
+            "  ch.description, "
+            "  COALESCE(agt.corporationID, ch.corporationID) AS corporationID "
+            " FROM chrNPCCharacters AS ch "
+            "  INNER JOIN agtAgents AS agt ON agt.agentID = ch.characterID "
+            " WHERE ch.characterID=%u", charID))
+        {
+            codelog(DATABASE__ERROR, "Error in GetCharPublicInfo3 (mission) query: %s", res.error.c_str());
+            return nullptr;
+        }
+        return DBResultToCRowset(res);
+    }
     if (!sDatabase.RunQuery(res,
         "SELECT "
         "  bounty,"
@@ -809,6 +900,27 @@ PyRep* CharacterDB::GetCharPublicInfo3(uint32 charID) {
 PyRep* CharacterDB::GetCharPrivateInfo(uint32 charID) {
     // characterID, gender, raceID, bloodlineID, createDateTime
     DBQueryResult res;
+    if (IsMissionAgent(charID)) {
+        if (!sDatabase.RunQuery(res,
+            "SELECT"
+            "  ch.gender,"
+            "  ch.createDateTime,"
+            "  IFNULL(cbl.raceID, 0) AS raceID,"
+            "  IFNULL(bl.bloodlineID, 0) AS bloodlineID"
+            " FROM chrNPCCharacters AS ch "
+            "  INNER JOIN agtAgents AS agt ON agt.agentID = ch.characterID "
+            "  LEFT JOIN bloodlineTypes AS bl ON bl.typeID = ch.typeID "
+            "  LEFT JOIN chrBloodlines AS cbl ON cbl.bloodlineID = bl.bloodlineID "
+            " WHERE ch.characterID=%u", charID))
+        {
+            codelog(DATABASE__ERROR, "Error in GetCharPrivateInfo (mission) query: %s", res.error.c_str());
+            return nullptr;
+        }
+        DBResultRow row;
+        if (!res.GetRow(row))
+            return nullptr;
+        return DBRowToPackedRow(row);
+    }
     if (!sDatabase.RunQuery(res,
         "SELECT"
         "  gender,"
@@ -831,6 +943,27 @@ PyRep* CharacterDB::GetCharPrivateInfo(uint32 charID) {
 PyRep *CharacterDB::GetInfoWindowDataForChar(uint32 characterID) {
     //corpID, allianceID, title
     DBQueryResult res;
+    if (IsMissionAgent(characterID)) {
+        if (!sDatabase.RunQuery(res,
+            "SELECT "
+            "  COALESCE(agt.corporationID, ch.corporationID) AS corpID,"
+            "  co.allianceID,"
+            "  ch.title"
+            " FROM chrNPCCharacters AS ch"
+            "  INNER JOIN agtAgents AS agt ON agt.agentID = ch.characterID"
+            "  LEFT JOIN crpCorporation AS co ON co.corporationID = COALESCE(agt.corporationID, ch.corporationID)"
+            " WHERE ch.characterID=%u", characterID))
+        {
+            codelog(DATABASE__ERROR, "Error in GetInfoWindowDataForChar (mission) query: %s", res.error.c_str());
+            return nullptr;
+        }
+        DBResultRow row;
+        if (!res.GetRow(row)) {
+            codelog(DATABASE__ERROR, "Expected at least one row when getting mission agent corp info\n");
+            return nullptr;
+        }
+        return DBRowToKeyVal(row);
+    }
     if (!sDatabase.RunQuery(res,
         "SELECT "
         "  ch.corporationID AS corpID,"
@@ -862,12 +995,19 @@ std::string CharacterDB::GetCharName(uint32 characterID)
     }
 
     DBResultRow row;
-    if (!res.GetRow(row)) {
-        _log(DATABASE__MESSAGE, "Name not found for CharacterID %u.", characterID);
-        return "";
+    if (res.GetRow(row)) {
+        return row.GetText(0);
     }
 
-    return row.GetText(0);
+    if (IsMissionAgent(characterID)
+        && sDatabase.RunQuery(res, "SELECT characterName FROM chrNPCCharacters WHERE characterID=%u", characterID)
+        && res.GetRow(row))
+    {
+        return row.GetText(0);
+    }
+
+    _log(DATABASE__MESSAGE, "Name not found for CharacterID %u.", characterID);
+    return "";
 }
 
 void CharacterDB::SetCharacterOnlineStatus(uint32 char_id, bool online) {
@@ -1723,7 +1863,7 @@ void CharacterDB::AddBounty(uint32 charID, uint32 ownerID, uint32 amount) {
         charID, ownerID, amount );
 }
 
-PyRep* CharacterDB::GetKillOrLoss(uint32 charID) {
+PyRep* CharacterDB::GetKillOrLoss(uint32 charID, uint32 limit, uint32 offset) {
     /*
      *    def GetKillsRecentKills(self, num, startIndex):
      *        shipKills = sm.RemoteSvc('charMgr').GetRecentShipKillsAndLosses(num, startIndex)
@@ -1733,14 +1873,22 @@ PyRep* CharacterDB::GetKillOrLoss(uint32 charID) {
      *        shipKills = sm.RemoteSvc('charMgr').GetRecentShipKillsAndLosses(num, startIndex)
      *        return [ k for k in shipKills if k.victimCharacterID == eve.session.charid ]
      */
+    if (limit == 0)
+        limit = 100;
+    if (limit > 1000)
+        limit = 1000;
+
     DBQueryResult res;
     if (!sDatabase.RunQuery(res,
         "SELECT"
         "  killID,"
         "  solarSystemID,"
+        /* Do not insert columns before moonID: client reads kill rows by fixed column index; an extra
+         * locationID shifted indices so "moonID" was read as finalDamageDone (often 0) → EveLocations key 0. */
         "  victimCharacterID,"
         "  victimCorporationID,"
-        "  victimAllianceID,"
+        /* Legacy rows used -1 for no alliance; CombatLog_CopyText treats IDs as EveOwners keys. */
+        "  CASE WHEN victimAllianceID < 0 THEN 0 ELSE victimAllianceID END AS victimAllianceID,"
         "  victimFactionID,"
         "  victimShipTypeID,"
         "  finalCharacterID,"
@@ -1754,10 +1902,11 @@ PyRep* CharacterDB::GetKillOrLoss(uint32 charID) {
         "  victimDamageTaken,"
         "  finalSecurityStatus,"
         "  finalDamageDone,"
-        "  moonID"
+        "  IFNULL(NULLIF(moonID, 0), solarSystemID) AS moonID"
         " FROM chrKillTable"
-        " WHERE ((victimCharacterID = %u) OR (finalCharacterID = %u))", charID, charID))
-        /* should we limit this? */
+        " WHERE ((victimCharacterID = %u) OR (finalCharacterID = %u))"
+        " ORDER BY killTime DESC"
+        " LIMIT %u OFFSET %u", charID, charID, limit, offset))
     {
         codelog(DATABASE__ERROR, "Error on query: %s", res.error.c_str());
         return nullptr;

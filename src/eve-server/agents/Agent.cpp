@@ -31,11 +31,13 @@
 
 #include "agents/Agent.h"
 #include "agents/AgentDB.h"
+#include "station/StationDB.h"
 #include "../Client.h"
 #include "../fleet/FleetService.h"
 #include "../system/SystemManager.h"
 #include "../standing/StandingMgr.h"
 #include "corporation/LPService.h"
+#include "../../eve-common/EVE_Defines.h"
 
 
 Agent::Agent(uint32 id)
@@ -65,10 +67,10 @@ bool Agent::Load() {
 
 void Agent::MakeOffer(uint32 charID, MissionOffer& offer)
 {
-    // this will be based on agent type eventually
-    uint8 misionType = Mission::Type::Courier;
+    const uint8 misionType = sMissionDataMgr.ChooseMissionOfferKind(
+        m_agentData.level, m_agentData.raceID, m_important, m_agentID, charID, m_agentData.corporationID, m_agentData.divisionID);
 
-    sMissionDataMgr.CreateMissionOffer(misionType, m_agentData.level, m_agentData.raceID, m_important, offer);
+    sMissionDataMgr.CreateMissionOffer(misionType, m_agentData.level, m_agentData.raceID, m_important, m_agentID, charID, offer, m_agentData.corporationID);
 
     /*  static mission data from db
     offer.name               = cData.name;
@@ -105,7 +107,7 @@ void Agent::MakeOffer(uint32 charID, MissionOffer& offer)
     //offer.destinationTypeID = 0;
     //offer.dungeonLocationID      = 0;
     //offer.dungeonSolarSystemID   = 0;
-    sMapData.GetMissionDestination(this, misionType, offer);
+    sMapData.GetMissionDestination(this, offer.typeID, offer);
     if (offer.destinationID == 0) {
         // make error here and reset
         sEntityList.FindClientByCharID(charID)->SendErrorMsg("Internal Server Error. Ref: ServerError 07208.");
@@ -117,6 +119,31 @@ void Agent::MakeOffer(uint32 charID, MissionOffer& offer)
     offer.remoteCompletable  = false;
     // LP Reward
     offer.rewardLP           = LPService::GetLPReward(offer.missionID, m_agentData.solarSystemID, m_agentData.level);   // LP reward = (1.6288 - System security) × Base LP
+    if (m_agentID == 90000007 and offer.missionID == 58373)
+        offer.rewardLP = 0;   // Finale: item + ISK from template (no LP); UI/completion must match
+    if (m_agentID == 90000007 and offer.missionID == 58373) {
+        // Dark Blood faction modules to small/medium only (no heavy/large/mega/crystals), granted built.
+        static const uint32_t kJuroFinaleDarkBloodModuleTypeIDs[] = {
+            13795U, 13797U, 13799U, 13801U, 13803U, 13809U, 13811U, 13819U,
+            13941U, 13960U, 13964U, 13972U, 13976U, 13980U, 13984U,
+            14003U, 14009U, 14015U, 14021U, 14027U, 14070U, 14076U, 14082U, 14088U, 14094U,
+            14134U, 14142U, 14144U, 14148U, 14156U, 14160U, 14164U, 14176U, 14180U, 14184U, 14192U, 14196U,
+            14200U, 14242U, 14252U, 14262U, 32416U,
+        };
+        // Ship BPCs up to Ashimmu (cruiser tier cap for this reward); excludes Bhaalgorn (17921).
+        // Cruor + Ashimmu are Blood Raiders; Succubus is Sansha but matches prior Juro template loot (17925).
+        static const uint32_t kJuroFinaleBloodRaiderShipBpTypeIDs[] = {
+            17923U, /* Ashimmu Blueprint */
+            17925U, /* Succubus Blueprint */
+            17927U, /* Cruor Blueprint */
+        };
+        constexpr size_t nM = sizeof(kJuroFinaleDarkBloodModuleTypeIDs) / sizeof(kJuroFinaleDarkBloodModuleTypeIDs[0]);
+        constexpr size_t nB = sizeof(kJuroFinaleBloodRaiderShipBpTypeIDs) / sizeof(kJuroFinaleBloodRaiderShipBpTypeIDs[0]);
+        offer.rewardItemID = kJuroFinaleDarkBloodModuleTypeIDs[static_cast<size_t>(MakeRandomInt(0, static_cast<uint32_t>(nM - 1)))];
+        offer.rewardItemQty = 1;
+        offer.rewardExtraItemID = static_cast<uint16_t>(
+            kJuroFinaleBloodRaiderShipBpTypeIDs[static_cast<size_t>(MakeRandomInt(0, static_cast<uint32_t>(nB - 1)))]);
+    }
     // same with these
     offer.acceptFee          = 0;
 
@@ -141,6 +168,21 @@ void Agent::MakeOffer(uint32 charID, MissionOffer& offer)
             offer.destinationOwnerID  = m_agentData.corporationID;
             offer.destinationSystemID = m_agentData.solarSystemID;
         }
+    }
+    if (IsStationID(offer.destinationID) and offer.destinationID != 0) {
+        if (offer.destinationSystemID == 0) {
+            offer.destinationSystemID = sDataMgr.GetStationSystem(offer.destinationID);
+            if (offer.destinationSystemID == 0)
+                offer.destinationSystemID = StationDB::GetSolarSystemIDForStation(offer.destinationID);
+        }
+    } else if (IsSolarSystemID(offer.destinationID) and offer.destinationID != 0) {
+        if (offer.destinationSystemID == 0)
+            offer.destinationSystemID = offer.destinationID;
+    }
+    if (IsStationID(offer.originID) and offer.originID != 0 and offer.originSystemID == 0) {
+        offer.originSystemID = sDataMgr.GetStationSystem(offer.originID);
+        if (offer.originSystemID == 0)
+            offer.originSystemID = StationDB::GetSolarSystemIDForStation(offer.originID);
     }
 
     MissionDB::CreateOfferID(offer);
@@ -619,8 +661,7 @@ void Agent::UpdateStandings(Client* pClient, uint8 eventID, bool important/*fals
         } break;
         case Standings::MissionDeclined: {
             msg += "decline ";
-            // test for mission declined in last 4 hours
-            //newStanding *= sConfig.standings.MissionDeclined;
+            newStanding *= sConfig.standings.MissionDeclined;
         } break;
         case Standings::MissionFailure: {
             msg += "failure ";

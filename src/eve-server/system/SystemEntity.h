@@ -234,6 +234,18 @@ public:
     uint32                      GetLocationID()         { return m_self->locationID(); }
     const char*                 GetName() const         { return m_self->name(); }
     const GPoint&               GetPosition() const     { return m_self->position(); }
+    /** Current in-space position: destiny sim when present and sane, else item position.
+     *  Piloted ships may not have server destiny coords synced every tick; item position
+     *  stays authoritative for spawn/orbit targets. Drones orbiting (0,0,0) otherwise spam
+     *  SetPosition rejections and never leave the origin ring. */
+    GPoint                      GetAuthPosition() const {
+        if (m_destiny != nullptr) {
+            const GPoint d(m_destiny->GetPosition());
+            if (d.isNotZero() && !d.isNaN() && !d.isInf())
+                return d;
+        }
+        return m_self->position();
+    }
     void                  SetPosition(const GPoint &pos){ m_self->SetPosition(pos); }
     void                        SetRadius(double radius){ m_self->SetRadius(radius); }
     void                        Rename(const char *name){ m_self->Rename(name); }
@@ -252,7 +264,7 @@ public:
 
 
     /* public generic functions handled in base class. */
-    void                        DropLoot(WreckContainerRef wreckRef, uint32 groupID, uint32 owner);
+    void                        DropLoot(WreckContainerRef wreckRef, uint32 groupID, uint32 owner, bool killerIsPlayerCharacter = false);
     void                        AwardSecurityStatus(InventoryItemRef iRef, Character* pChar);
     bool                        ApplyDamage(Damage &d); /* This method is defined in Damage.cpp */
     double                      DistanceTo2(const SystemEntity* other);

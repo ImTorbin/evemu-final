@@ -941,7 +941,10 @@ PyResult Command_getposition(Client* pClient, CommandDB* db, EVEServiceManager &
         throw CustomError ("You have no destiny manager.");
 
     GPoint sPos(pClient->GetShipSE()->GetPosition());
-    GPoint mPos(pClient->SystemMgr()->GetClosestMoonSE(sPos)->GetPosition());
+    SystemEntity* pMoon = pClient->SystemMgr()->GetClosestMoonSE(sPos);
+    if (pMoon == nullptr)
+        throw CustomError("No moons in this system.");
+    GPoint mPos(pMoon->GetPosition());
     GVector vec(sPos, mPos);
 
     float normProd = sPos.normalize() * mPos.normalize();

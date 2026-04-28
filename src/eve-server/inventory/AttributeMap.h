@@ -112,7 +112,7 @@ protected:
      * @retval true  The attribute has successfully been added and queued.
      * @retval false The attribute addition has not been queued and not been changed.
      */
-    bool SendChanges(PyTuple* attrChange);
+    bool SendChanges(PyTuple* attrChange, bool bypassLoginHudSim = false);
 
     InventoryItem& mItem;
 

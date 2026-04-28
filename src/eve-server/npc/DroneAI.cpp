@@ -46,6 +46,19 @@ DroneAIMgr::DroneAIMgr(DroneSE* who)
 
     if (m_entityAttackRange < 10000)   // most of these are low...under 6k  that sux for targeting
         m_entityAttackRange *= 3;
+    if (m_entityChaseRange < m_entityAttackRange * 2.0)
+        m_entityChaseRange = m_entityAttackRange * 2.0;
+    if (m_entityChaseRange < 10000.0)
+        m_entityChaseRange = 10000.0;
+}
+
+uint32 DroneAIMgr::PackedOrbitDistance(double baseMeters) const {
+    const double b = EvE::max(500.0, baseMeters);
+    const double spread = static_cast<double>((m_pDrone->GetID() % 13u) * 25u);
+    double total = b + spread;
+    if (total > 200000.0)
+        total = 200000.0;
+    return static_cast<uint32>(total);
 }
 
 void DroneAIMgr::Process() {
@@ -105,7 +118,11 @@ void DroneAIMgr::Process() {
         } break;
 
         case DroneAI::State::Departing: { // return to ship.  when close enough, set lazy orbit
-            if (m_pDrone->GetPosition().distance(m_assignedShip->GetPosition()) < m_entityOrbitRange)
+            if (m_assignedShip == nullptr) {
+                SetIdle();
+                break;
+            }
+            if (m_pDrone->GetAuthPosition().distance(m_assignedShip->GetAuthPosition()) < m_entityOrbitRange)
                 SetIdle();
         } break;
         // not sure how im gonna do these...
@@ -150,24 +167,22 @@ void DroneAIMgr::Return() {
 }
 
 void DroneAIMgr::SetIdle() {
-    if (m_state == DroneAI::State::Idle) {
-        m_miningRepeated = false;
-        return;
-    }
-    // not doing anything....idle.
-    _log(DRONE__AI_TRACE, "Drone %s(%u): SetIdle: returning to idle.",
-         m_pDrone->GetName(), m_pDrone->GetID());
-    m_state = DroneAI::State::Idle;
-
-    // disable ewar timers
-    m_webifierTimer.Disable();
-    m_beginFindTarget.Disable();
-    m_mainAttackTimer.Disable();
-    m_warpScramblerTimer.Disable();
     m_miningRepeated = false;
+    if (m_state != DroneAI::State::Idle) {
+        _log(DRONE__AI_TRACE, "Drone %s(%u): SetIdle: returning to idle.",
+             m_pDrone->GetName(), m_pDrone->GetID());
+        m_state = DroneAI::State::Idle;
 
-    // orbit assigned ship
-    m_pDrone->IdleOrbit(m_assignedShip);
+        m_webifierTimer.Disable();
+        m_beginFindTarget.Disable();
+        m_mainAttackTimer.Disable();
+        m_warpScramblerTimer.Disable();
+    }
+
+    // Always (re)start idle orbit when entering idle — ctor state is already Idle so the
+    // first LaunchDrone()->Online()->SetIdle() path must still call IdleOrbit().
+    if (m_assignedShip != nullptr)
+        m_pDrone->IdleOrbit(m_assignedShip);
 }
 
 bool DroneAIMgr::StartMining(SystemEntity* pTarget, bool repeatedly) {
@@ -199,12 +214,12 @@ bool DroneAIMgr::StartMining(SystemEntity* pTarget, bool repeatedly) {
     m_pDrone->StateChange();
 
     m_pDrone->DestinyMgr()->SetMaxVelocity(m_chaseSpeed);
-    m_pDrone->DestinyMgr()->Orbit(pTarget, EvE::max(500.0, m_entityOrbitRange));
+    m_pDrone->DestinyMgr()->Orbit(pTarget, PackedOrbitDistance(m_entityOrbitRange));
     return true;
 }
 
 void DroneAIMgr::SetEngaged(SystemEntity* pTarget) {
-    if (m_state == DroneAI::State::Engaged)
+    if (m_state == DroneAI::State::Engaged && m_pDrone->DestinyMgr()->IsOrbiting())
         return;
     _log(DRONE__AI_TRACE, "Drone %s(%u): SetEngaged: %s(%u) begin engaging.",
          m_pDrone->GetName(), m_pDrone->GetID(), pTarget->GetName(), pTarget->GetID());
@@ -213,30 +228,42 @@ void DroneAIMgr::SetEngaged(SystemEntity* pTarget) {
     //   this sets orbit speed between cruise speed and quarter of max speed (whether mwb or ab)
     //   this will also enable this npc to have a variable speed, instead of fixed upon creation.
     m_pDrone->DestinyMgr()->SetMaxVelocity(MakeRandomFloat(m_cruiseSpeed, (m_chaseSpeed /4)));
-    m_pDrone->DestinyMgr()->Orbit(pTarget, m_entityOrbitRange);  //try to get inside orbit range
+    m_pDrone->DestinyMgr()->Orbit(pTarget, PackedOrbitDistance(m_entityOrbitRange));  //try to get inside orbit range
     m_state = DroneAI::State::Engaged;
 }
 
 void DroneAIMgr::CheckDistance(SystemEntity* pSE)
 {
-    //rewrote distance checks for correct logic this time
-    double dist = m_pDrone->GetPosition().distance(pSE->GetPosition());
+    const double dist = m_pDrone->GetAuthPosition().distance(pSE->GetAuthPosition());
+    const double dropDist = EvE::max(m_entityChaseRange, m_entityAttackRange * 2.5);
+    DestinyManager* d = m_pDrone->DestinyMgr();
+
+    if (dist > dropDist) {
+        _log(DRONE__AI_TRACE, "Drone %s(%u): CheckDistance: %s(%u) beyond chase envelope (%.0fm > %.0fm). Clear.",
+             m_pDrone->GetName(), m_pDrone->GetID(), pSE->GetName(), pSE->GetID(), dist, dropDist);
+        ClearTarget(pSE);
+        return;
+    }
+
     if (dist > m_entityAttackRange) {
-        _log(DRONE__AI_TRACE, "Drone %s(%u): CheckDistance: %s(%u) is too far away (%u).  Return to Idle.",
-             m_pDrone->GetName(), m_pDrone->GetID(), pSE->GetName(), pSE->GetID(), dist);
-        if (m_state != DroneAI::State::Idle) {
-            // target is no longer in npc's "sight range".  unlock target and return to idle.
-            //   should we do anything else here?  search for another target?  wander around?
-            ClearTarget(pSE);
+        const bool followingSame = d->IsFollowing() && d->GetTargetID() == pSE->GetID();
+        if (!followingSame) {
+            d->SetMaxVelocity(m_chaseSpeed);
+            d->Follow(pSE, PackedOrbitDistance(m_entityOrbitRange * 0.35));
         }
+        m_state = DroneAI::State::Engaged;
         return;
-    } else if (dist < m_entityFlyRange) { //within weapon max (and within falloff)
-        SetEngaged(pSE); //engage and orbit
-    } else if (dist < m_entityChaseRange) { //within follow
-       // SetFollowing(pSE);
-    } else if (dist < m_entityAttackRange) { //within sight
-       // SetChasing(pSE);
-        return;
+    }
+
+    if (dist < m_entityFlyRange) {
+        SetEngaged(pSE);
+    } else {
+        const bool orbitingSame = d->IsOrbiting() && d->GetTargetID() == pSE->GetID();
+        if (!orbitingSame && (d->IsFollowing() || m_state != DroneAI::State::Engaged)) {
+            d->SetMaxVelocity(MakeRandomFloat(m_cruiseSpeed, (m_chaseSpeed / 4)));
+            d->Orbit(pSE, PackedOrbitDistance(m_entityOrbitRange));
+        }
+        m_state = DroneAI::State::Engaged;
     }
 
     if (!m_mainAttackTimer.Enabled())
@@ -264,6 +291,10 @@ void DroneAIMgr::Target(SystemEntity* pTarget) {
         return;
     }
     m_beginFindTarget.Disable();
+    if (m_assignedShip == nullptr)
+        m_assignedShip = m_pDrone->GetHomeShip();
+    m_state = DroneAI::State::Engaged;
+    m_pDrone->DestinyMgr()->SetMaxVelocity(m_chaseSpeed);
     CheckDistance(pTarget);
 
     /*
@@ -339,7 +370,7 @@ void DroneAIMgr::Attack(SystemEntity* pSE)
             return;
         // Check to see if the target still in the bubble (Client warped out)
         // fighters/bombers are able to follow.
-        if (!m_pDrone->SysBubble()->InBubble(pSE->GetPosition())) {
+        if (!m_pDrone->SysBubble()->InBubble(pSE->GetAuthPosition())) {
             _log(DRONE__AI_TRACE, "Drone %s(%u): Target %s(%u) no longer in bubble.  Clear target and move on",
                  m_pDrone->GetName(), m_pDrone->GetID(), pSE->GetName(), pSE->GetID());
             ClearTarget(pSE);
@@ -379,9 +410,9 @@ void DroneAIMgr::Mine(SystemEntity* pSE)
     }
 
     const float range = EvE::max(500.0f, m_pDrone->GetSelf()->GetAttribute(AttrMaxRange).get_float());
-    const double distance = m_pDrone->GetPosition().distance(pSE->GetPosition());
+    const double distance = m_pDrone->GetAuthPosition().distance(pSE->GetAuthPosition());
     if (distance > range) {
-        m_pDrone->DestinyMgr()->Orbit(pSE, range * 0.8);
+        m_pDrone->DestinyMgr()->Orbit(pSE, PackedOrbitDistance(static_cast<double>(range) * 0.8));
         return;
     }
 

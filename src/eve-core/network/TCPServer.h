@@ -59,12 +59,13 @@ public:
     /**
      * @brief Start listening on specified port.
      *
-     * @param[in]  port   Port on which listening should be started.
-     * @param[out] errbuf Error buffer which receives description of error.
+     * @param[in]  port         Port on which listening should be started.
+     * @param[out] errbuf       Error buffer which receives description of error.
+     * @param[in]  bindAddress  IPv4 dotted-quad to bind exclusively, or nullptr/empty for all interfaces (INADDR_ANY).
      *
      * @return True if listening has been started successfully, false if not.
      */
-    bool Open( uint16 port, char* errbuf = 0 );
+    bool Open( uint16 port, char* errbuf = 0, const char* bindAddress = nullptr );
     /**
      * @brief Stops started listening.
      */

@@ -64,6 +64,7 @@ public:
     ~SystemManager();
 
     bool ProcessTic();          // called at 1Hz.
+    void ProcessDynamicDestiny(); // non-pilot destiny (orbit/FOLLOW/etc., rate set by DynamicDestinyMs)
     bool BootSystem();
     void UnloadSystem();
     void UpdateData();          // called from EntityList every 5m for active systems
@@ -103,6 +104,8 @@ public:
     uint8 GetRatSpawnCount()                            { return m_activeRatSpawns; }
     uint16 GetRoidSpawnCount()                          { return m_activeRoidSpawns; }
     uint32 PlayerCount()                                { return m_players; }
+    /** True if any character session is registered in this system (works when m_players drifts). */
+    bool HasClientsInSystem() const                     { return !m_clients.empty(); }
     uint32 GetSysNPCCount()                             { return m_npcs.size(); }
 
     // CosmicMgr interface

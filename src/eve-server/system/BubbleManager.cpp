@@ -98,7 +98,7 @@ void BubbleManager::Process() {
         if (!m_wanderers.empty()) {
             for (auto cur : m_wanderers) {
                 // do we really want to check this?
-                if (cur->GetPosition().isNaN() or cur->GetPosition().isInf() or cur->GetPosition().isZero()) {
+                if (cur->GetAuthPosition().isNaN() or cur->GetAuthPosition().isInf() or cur->GetAuthPosition().isZero()) {
                     // position error.  this will screw things up.  if haspilot, send error.
                     if (cur->HasPilot())
                         cur->GetPilot()->SendErrorMsg("Internal Server Error.  Ref: ServerError 35148<br>Please either dock or relog.");
@@ -123,15 +123,15 @@ void BubbleManager::Process() {
 void BubbleManager::CheckBubble(SystemEntity *pSE) {
     SystemBubble *pBubble = pSE->SysBubble();
     if (pBubble != nullptr) {
-        if (pBubble->InBubble(pSE->GetPosition())) {
+        if (pBubble->InBubble(pSE->GetAuthPosition())) {
             _log(DESTINY__BUBBLE_DEBUG, "BubbleManager::CheckBubble() - Entity '%s'(%u) at (%.2f,%.2f,%.2f) is still located in bubble %u at %.2f,%.2f,%.2f.",\
-                 pSE->GetName(), pSE->GetID(), pSE->GetPosition().x, pSE->GetPosition().y, pSE->GetPosition().z,\
+                 pSE->GetName(), pSE->GetID(), pSE->GetAuthPosition().x, pSE->GetAuthPosition().y, pSE->GetAuthPosition().z,\
                  pBubble->GetID(), pBubble->x(), pBubble->y(), pBubble->z());
             return;
         }
 
         _log(DESTINY__BUBBLE_DEBUG, "BubbleManager::CheckBubble() - Entity '%s'(%u) at (%.2f,%.2f,%.2f) is no longer located in bubble %u at %.2f,%.2f,%.2f.  Removing...",\
-             pSE->GetName(), pSE->GetID(), pSE->GetPosition().x, pSE->GetPosition().y, pSE->GetPosition().z,\
+             pSE->GetName(), pSE->GetID(), pSE->GetAuthPosition().x, pSE->GetAuthPosition().y, pSE->GetAuthPosition().z,\
              pBubble->GetID(), pBubble->x(), pBubble->y(), pBubble->z());
         pBubble->Remove(pSE);
     }
@@ -158,10 +158,10 @@ void BubbleManager::Add(SystemEntity* pSE, bool isPostWarp /*false*/) {
     if (pSE == nullptr)
         return;
 
-    if (pSE->GetPosition().isZero())
+    if (pSE->GetAuthPosition().isZero())
          pSE->DestinyMgr()->SetPosition(sMapData.GetRandPointOnPlanet(pSE->SystemMgr()->GetID()));
 
-    GPoint center(pSE->GetPosition());
+    GPoint center(pSE->GetAuthPosition());
     if (isPostWarp) {
         // Calculate new bubble's center based on entity's velocity and current position
         NewBubbleCenter( pSE->GetVelocity(), center );
@@ -177,7 +177,7 @@ void BubbleManager::Add(SystemEntity* pSE, bool isPostWarp /*false*/) {
             } else if (pSE->SysBubble() != pBubble) {
                 _log(DESTINY__BUBBLE_TRACE, "BubbleManager::Add(): bubbleID %u != pSE bubbleID %u", pBubble->GetID(), pSE->SysBubble()->GetID() );
                 pSE->SysBubble()->Remove(pSE);
-            } else if (pSE->SysBubble()->InBubble(pSE->GetPosition()))  {
+            } else if (pSE->SysBubble()->InBubble(pSE->GetAuthPosition()))  {
                 _log(DESTINY__BUBBLE_TRACE, "BubbleManager::Add(): Entity %s(%u) still in Bubble %u", pSE->GetName(), pSE->GetID(), pBubble->GetID() );
                 return;
             }
@@ -240,7 +240,7 @@ void BubbleManager::Remove(SystemEntity *ent) {
  * NOTE:  these are only used here...
  */
 SystemBubble* BubbleManager::FindBubble(SystemEntity *ent) const {
-    return FindBubble(ent->SystemMgr()->GetID(), ent->GetPosition());
+    return FindBubble(ent->SystemMgr()->GetID(), ent->GetAuthPosition());
 }
 
 SystemBubble* BubbleManager::FindBubble(uint32 systemID, const GPoint &pos) const {
@@ -263,6 +263,20 @@ SystemBubble* BubbleManager::GetBubble(SystemManager* sysMgr, const GPoint& pos)
     SystemBubble* pBubble(FindBubble(sysMgr->GetID(), pos));
     if (pBubble == nullptr)
         pBubble = MakeBubble(sysMgr, pos);
+
+    // Warp / movement can resolve to a generic grid bubble while the same coordinates still
+    // lie inside an asteroid-belt bubble (belt anchor vs warp stop, overlapping spheres, or
+    // equal_range iteration order). BeltMgr::CheckSpawn only runs on belt bubbles; if we stay
+    // on a non-belt bubble, roids never get SendAddBalls until a later grid change — players
+    // see empty belts until they warp away.
+    if (pBubble != nullptr && !pBubble->IsBelt()) {
+        auto range = m_sysBubbleMap.equal_range(sysMgr->GetID());
+        for (auto itr = range.first; itr != range.second; ++itr) {
+            SystemBubble* belt = itr->second;
+            if (belt != nullptr && belt != pBubble && belt->IsBelt() && belt->InBubble(pos))
+                return belt;
+        }
+    }
 
     return pBubble;
 }
@@ -371,7 +385,7 @@ void BubbleManager::GetBubbleCenterMarkers(std::vector<CosmicSignature>& anom) {
             sig.sigStrength = 1.0;
             //sig.sigTypeID = EVEDB::invTypes::CosmicAnomaly;     // result.typeID
             sig.systemID = cur.first;
-            sig.position = cSE->GetPosition();
+            sig.position = cSE->GetAuthPosition();
             sig.scanAttributeID = AttrScanMagnetometricStrength;   // result.strengthAttributeID
             sig.scanGroupID = Scanning::Group::Signature;
         anom.push_back(sig);
@@ -395,7 +409,7 @@ void BubbleManager::GetBubbleCenterMarkers(uint32 systemID, std::vector<CosmicSi
             sig.sigStrength = 1.0;
             //sig.sigTypeID = EVEDB::invTypes::CosmicAnomaly;
             sig.systemID = systemID;
-            sig.position = cSE->GetPosition();
+            sig.position = cSE->GetAuthPosition();
             sig.scanAttributeID = AttrScanMagnetometricStrength;
             sig.scanGroupID = Scanning::Group::Signature;
         anom.push_back(sig);

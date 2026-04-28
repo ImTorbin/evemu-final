@@ -259,28 +259,30 @@ void SpawnMgr::SpawnKilled(SystemBubble* pBubble, uint32 itemID)
             pBubble->SetSpawned(false);
     } else if (pBubble->IsAnomaly()) {
         _log(SPAWN__DEPOP, "SpawnMgr::SpawnKilled::Anomaly - called by %u.", itemID);
-        if (m_spawns.count(pBubble->GetID()) == 1) {
-            // last npc in this wave.  get data needed for next wave, if applicable.
-            SpawnEntryDef::iterator itr = m_spawns.find(pBubble->GetID());
-            if (itr == m_spawns.end())
-                return; // this is an error.
-            MakeSpawn(pBubble, itr->second.factionID, itr->second.spawnClass, itr->second.level);
-            // now remove this spawn from map.
-            m_spawns.erase(itr);
-            // unlock warp gate if applicable
-        } else if (m_spawns.count(pBubble->GetID()) < 1) {
-            // this is an error...
-        } else {
-            // there are still npcs in this wave....continue.
+        uint32 dungeonRootID = 0;
+        {
+            auto range = m_spawns.equal_range(pBubble->GetID());
+            for (auto itr = range.first; itr != range.second; ++itr) {
+                if (itr->second.itemID == itemID) {
+                    dungeonRootID = itr->second.dungeonRootID;
+                    m_spawns.erase(itr);
+                    break;
+                }
+            }
         }
-
-        /*  this needs to deal with multiple things.
-         * 1- unlocking warp gates when needed per wave
-         * 2- dropping loot according to (wave/dungeon/template)?
-         * 3- after last spawn, possible escelation per dungeon type?   this should signal anomaly mgr to create the escelation
-         * 4- spawn next wave, if applicable  (code above...currently testing)
-         * 5- more/others?
-         */
+        if (dungeonRootID != 0 && m_dungMgr != nullptr) {
+            bool anyForDungeon = false;
+            for (const auto& kv : m_spawns) {
+                if (kv.second.dungeonRootID == dungeonRootID) {
+                    anyForDungeon = true;
+                    break;
+                }
+            }
+            if (!anyForDungeon) {
+                if (!m_dungMgr->TrySpawnNextAnomalyWave(dungeonRootID))
+                    m_dungMgr->OnDungeonCombatCleared(dungeonRootID);
+            }
+        }
     } else if (pBubble->IsMission()) {
         _log(SPAWN__DEPOP, "SpawnMgr::SpawnKilled::Mission - called by %u.", itemID);
         // placeholder - not coded yet.
@@ -301,18 +303,22 @@ void SpawnMgr::SpawnKilled(SystemBubble* pBubble, uint32 itemID)
 }
 
 // Spawn an individual enemy inside a dungeon (called by dungeonMgr)
-void SpawnMgr::DoSpawnForAnomaly(SystemBubble* pBubble, GPoint pos, uint8 level, uint16 typeID)
+void SpawnMgr::DoSpawnForAnomaly(SystemBubble* pBubble, GPoint pos, uint8 level, uint16 typeID, uint32 dungeonRootID, bool commanderWave)
 {
     if (pBubble == nullptr)
         return;
+    if (!sDataMgr.HasType(typeID)) {
+        _log(SPAWN__ERROR, "SpawnMgr::DoSpawnForAnomaly() - unknown typeID %u; spawn skipped.", typeID);
+        return;
+    }
     pBubble->SetAnomaly();
 
-    float secRating = m_system->GetSecValue();
-
-    // Get faction of enemy based on item type
+    // Get faction of enemy based on item type (name/group override bad invTypes.race on some pirate hulls)
     Inv::TypeData objType;
     sDataMgr.GetType(typeID, objType);
-    uint32 factionID = sDataMgr.GetRaceFaction(objType.race);
+    uint32 factionID = sDataMgr.InferNpcRatFactionForShipType(typeID);
+    if (factionID == StaticDataMgr::InferNpcRatFactionNoMatch)
+        factionID = sDataMgr.GetRaceFaction(objType.race);
 
     if (is_log_enabled(SPAWN__MESSAGE))
         _log(SPAWN__MESSAGE, "SpawnMgr::DoSpawnForAnomaly() - faction: %s, region %u.", \
@@ -321,6 +327,9 @@ void SpawnMgr::DoSpawnForAnomaly(SystemBubble* pBubble, GPoint pos, uint8 level,
     SpawnGroup group;
     group.quantity = 1;
     group.typeID = typeID;
+
+    m_toSpawn.clear();
+    m_toSpawn.push_back(group);
 
     if (m_toSpawn.size() > 0) {
         if (is_log_enabled(SPAWN__MESSAGE)) {
@@ -354,7 +363,7 @@ void SpawnMgr::DoSpawnForAnomaly(SystemBubble* pBubble, GPoint pos, uint8 level,
 
                 _log(SPAWN__POP, "SpawnMgr::MakeSpawn - Spawning NPC type %u (%u)", cur.typeID, iRef->itemID());
 
-                pNPC = new NPC(iRef, m_services, m_system, data, this);
+                pNPC = new NPC(iRef, m_services, m_system, data, this, commanderWave);
                 if (pNPC == nullptr)
                     continue;
 
@@ -366,18 +375,22 @@ void SpawnMgr::DoSpawnForAnomaly(SystemBubble* pBubble, GPoint pos, uint8 level,
 
                 m_system->AddNPC(pNPC);
 
-                pNPC->DestinyMgr()->SetPosition(startPos);
+                // Broadcast initial position; SetPosition(pt,false) skips destiny packets and observers
+                // can run CmdOrbit / prediction from a wrong origin until the first orbit sync.
+                pNPC->DestinyMgr()->SetPosition(startPos, true);
 
-                // For large ships, warp them in from a distance
+                /* Heavy ships (e.g. escalation boss battleships): use subwarp approach, not WarpTo().
+                 * WarpTo() forces Ball::Mode::WARP so IsWarping() stays true during align+tunnel; the client
+                 * then rejects locks (DeniedTargetOtherWarping) and the short ~1–12 km leg often ends in a hard
+                 * position snap when warp completes. */
                 if (iRef->GetAttribute(AttrMass) > 10000000) {
-                    // adjust warpIn point so show some variation instead of a straight line.
-                    GPoint warpTo(warpToPoint);
-                    warpTo.MakeRandomPointOnSphere(rand()%(12) *1000);  // random point (1-12) x 1k from center
-                    pNPC->DestinyMgr()->WarpTo(warpTo, (MakeRandomInt(-5, 10) *1000));
+                    GPoint approachFrom(startPos);
+                    approachFrom.MakeRandomPointOnSphere(static_cast<double>((rand() % 12) + 1) * 1000.0);
+                    pNPC->DestinyMgr()->SetPosition(approachFrom, true);
+                    pNPC->DestinyMgr()->GotoPoint(startPos);
                 }
 
-                // Temporary: generate random spawn class
-                uint8 sClass = rand()%(12) + 1;
+                uint8 sClass = commanderWave ? Spawn::Class::Commander : static_cast<uint8>(Spawn::Class::Easy + (rand() % 7));
 
                 SpawnEntry se = SpawnEntry();
                 se.enabled = false;
@@ -397,27 +410,26 @@ void SpawnMgr::DoSpawnForAnomaly(SystemBubble* pBubble, GPoint pos, uint8 level,
                 } else {
                     se.stamp = sEntityList.GetStamp(); // set time of this spawn for ??
                 }
+                se.dungeonRootID = dungeonRootID;
                 m_spawns.emplace(pBubble->GetID(), se);
                 _log(SPAWN__TRACE, "MakeSpawn() adding SpawnEntry with ID %u to m_spawns. Class: %s, Group:%s, Level: %u.", \
                             se.spawnID, GetSpawnClassName(se.spawnClass).c_str(), GetSpawnGroupName(se.spawnGroup).c_str(), level);
             }
         }
-        
-    ++m_spawnID;
-    m_bubbles.push_back(pBubble);
 
-    //cleanup
-    m_toSpawn.clear();
-    m_ratSpawns.clear();
+        ++m_spawnID;
+        m_bubbles.push_back(pBubble);
 
-    _log(SPAWN__TRACE, "MakeSpawn() completed in %s(%u) with %u bubbles in m_bubbles and %u entities in m_spawns.", \
-                m_system->GetName(), m_system->GetID(), m_bubbles.size(), m_spawns.size());
+        //cleanup
+        m_toSpawn.clear();
+        m_ratSpawns.clear();
+
+        _log(SPAWN__TRACE, "MakeSpawn() completed in %s(%u) with %u bubbles in m_bubbles and %u entities in m_spawns.", \
+                    m_system->GetName(), m_system->GetID(), m_bubbles.size(), m_spawns.size());
         return;
-    } else {
-        _log(SPAWN__ERROR, "SpawnMgr::PrepSpawn() - Nothing to spawn.");
     }
 
-    return;
+    _log(SPAWN__ERROR, "SpawnMgr::DoSpawnForAnomaly() - Nothing to spawn for typeID %u.", typeID);
 }
 
 void SpawnMgr::DoSpawnForIncursion(SystemBubble* pBubble, uint32 regionID)
@@ -826,7 +838,7 @@ void SpawnMgr::MakeSpawn(SystemBubble* pBubble, uint32 factionID, uint8 sClass, 
 
             m_system->AddNPC(pNPC);
 
-            pNPC->DestinyMgr()->SetPosition(startPos);
+            pNPC->DestinyMgr()->SetPosition(startPos, true);
             //  begin warp.  this may have to be looked into later for timing of large spawns (>6)
             //  actually looks kinda cool when larger ships come in later...
             if (sClass <= Spawn::Class::Officer) {   // ratspawn will warp in, others will not.

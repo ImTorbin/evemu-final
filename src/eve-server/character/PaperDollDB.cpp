@@ -29,6 +29,20 @@
 
 #include "character/PaperDollDB.h"
 
+namespace {
+/** Client expects util.Row (hairDarkness) for appearance; NPCs / empty avatars have no DB row. */
+PyRep* DefaultPaperDollAppearanceRow() {
+    PyDict* args = new PyDict();
+    PyList* header = new PyList(1);
+    header->SetItemString(0, "hairDarkness");
+    args->SetItemString("header", header);
+    PyList* line = new PyList(1);
+    line->SetItem(0, new PyFloat(0.5));
+    args->SetItemString("line", line);
+    return new PyObject("util.Row", args);
+}
+} // namespace
+
 PyRep* PaperDollDB::GetPaperDollAvatar(uint32 charID) const {
 
     DBQueryResult res;
@@ -40,7 +54,8 @@ PyRep* PaperDollDB::GetPaperDollAvatar(uint32 charID) const {
     }
 
 	DBResultRow row;
-	res.GetRow(row);
+	if (!res.GetRow(row))
+        return DefaultPaperDollAppearanceRow();
 
 	return DBRowToRow(row, "util.Row");
 }
@@ -93,4 +108,99 @@ PyRep* PaperDollDB::GetPaperDollPortraitData(uint32 charID) const
     }
 
     return DBResultToCRowset(res);
+}
+
+uint32 PaperDollDB::ResolvePaperDollSourceCharID(uint32 characterID, uint32 excludeDonorCharID) const
+{
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT gender FROM chrNPCCharacters WHERE characterID=%u LIMIT 1",
+        characterID))
+    {
+        _log(DATABASE__ERROR, "ResolvePaperDollSourceCharID: %s", res.error.c_str());
+        return characterID;
+    }
+    DBResultRow row;
+    if (!res.GetRow(row)) {
+        return characterID;
+    }
+
+    const uint32 gender = row.GetUInt(0);
+
+    if (sDatabase.RunQuery(res, "SELECT 1 FROM avatar_modifiers WHERE charID=%u LIMIT 1", characterID)) {
+        if (res.GetRow(row)) {
+            return characterID;
+        }
+    }
+
+    /** Prefer chrNPCCharacters rows with outfits (seed donors), then oldest; optional exclude = viewer. */
+    const char kOrderNpcFirst[] =
+        " ORDER BY CASE WHEN EXISTS (SELECT 1 FROM chrNPCCharacters AS n WHERE n.characterID = c.characterID) "
+        "  THEN 0 ELSE 1 END, c.createDateTime ASC, c.characterID ASC LIMIT 1";
+
+    if (excludeDonorCharID != 0) {
+        if (sDatabase.RunQuery(res,
+            "SELECT c.characterID FROM chrCharacters AS c "
+            "INNER JOIN avatars AS a ON a.charID = c.characterID "
+            "WHERE c.gender = %u AND c.characterID != %u "
+            "AND EXISTS (SELECT 1 FROM avatar_modifiers AS m WHERE m.charID = c.characterID)"
+            "%s",
+            gender, excludeDonorCharID, kOrderNpcFirst))
+        {
+            if (res.GetRow(row)) {
+                const uint32 tpl = row.GetUInt(0);
+                _log(DATABASE__MESSAGE, "PaperDoll: NPC %u -> donor %u (gender, exclude %u)",
+                    characterID, tpl, excludeDonorCharID);
+                return tpl;
+            }
+        }
+        if (sDatabase.RunQuery(res,
+            "SELECT c.characterID FROM chrCharacters AS c "
+            "INNER JOIN avatars AS a ON a.charID = c.characterID "
+            "WHERE c.characterID != %u "
+            "AND EXISTS (SELECT 1 FROM avatar_modifiers AS m WHERE m.charID = c.characterID)"
+            "%s",
+            excludeDonorCharID, kOrderNpcFirst))
+        {
+            if (res.GetRow(row)) {
+                const uint32 tpl = row.GetUInt(0);
+                _log(DATABASE__MESSAGE, "PaperDoll: NPC %u -> donor %u (any gender, exclude %u)",
+                    characterID, tpl, excludeDonorCharID);
+                return tpl;
+            }
+        }
+    }
+
+    if (sDatabase.RunQuery(res,
+        "SELECT c.characterID FROM chrCharacters AS c "
+        "INNER JOIN avatars AS a ON a.charID = c.characterID "
+        "WHERE c.gender = %u "
+        "AND EXISTS (SELECT 1 FROM avatar_modifiers AS m WHERE m.charID = c.characterID)"
+        "%s",
+        gender, kOrderNpcFirst))
+    {
+        if (res.GetRow(row)) {
+            const uint32 tpl = row.GetUInt(0);
+            _log(DATABASE__MESSAGE, "PaperDoll: NPC %u -> donor %u (gender %u, last-resort pool)",
+                characterID, tpl, gender);
+            return tpl;
+        }
+    }
+
+    if (sDatabase.RunQuery(res,
+        "SELECT c.characterID FROM chrCharacters AS c "
+        "INNER JOIN avatars AS a ON a.charID = c.characterID "
+        "WHERE EXISTS (SELECT 1 FROM avatar_modifiers AS m WHERE m.charID = c.characterID)"
+        "%s",
+        kOrderNpcFirst))
+    {
+        if (res.GetRow(row)) {
+            const uint32 tpl = row.GetUInt(0);
+            _log(DATABASE__MESSAGE, "PaperDoll: NPC %u -> donor %u (fallback pool)",
+                characterID, tpl);
+            return tpl;
+        }
+    }
+
+    return characterID;
 }

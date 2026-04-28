@@ -42,7 +42,7 @@ class NPC
 : public DynamicSystemEntity
 {
 public:
-    NPC(InventoryItemRef self, EVEServiceManager& services, SystemManager* system, const FactionData& data, SpawnMgr* spawnMgr = nullptr);
+    NPC(InventoryItemRef self, EVEServiceManager& services, SystemManager* system, const FactionData& data, SpawnMgr* spawnMgr = nullptr, bool anomalyCommanderLoot = false);
     virtual ~NPC();
 
     /* class type pointer querys. */
@@ -87,6 +87,8 @@ public:
 protected:
     NPCAIMgr* m_AI;
     SpawnMgr* m_spawnMgr;
+    /** Cosmic anomaly final commander wave — extra faction module / BPC drops. */
+    bool m_anomalyCommanderLoot;
 
 private:
     uint32 m_orbitingID;

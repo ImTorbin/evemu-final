@@ -1,0 +1,20 @@
+-- Seeded as migration: 20260425270000-cq_juro_darksynth_90000007.sql
+--   agent id 90000007, name Juro Darksynth, station 60007117, CQ position from your dev placement.
+-- If `UPDATE chrNPCCharacters` in that migration affects 0 rows, you must have characterID 90000007
+-- as an NPC in chrNPCCharacters (not only in chrCharacters — agent pipeline uses NPC).
+--
+-- Yaw below is from quaternion (0, 0.396854043006897, 0, 0.9178816676139832) ≈ facing +Y in scene space.
+--
+-- UPDATE staCQCustomAgents SET
+--   missionAgentID = <your agtAgents.agentID>,
+--   appearanceCharID = 0,
+--   posX = -0.352, posY = 0.248, posZ = 3.798,
+--   yaw = 0.826088,
+--   updatedAt = UNIX_TIMESTAMP(CURRENT_TIMESTAMP)
+-- WHERE stationID = 60007117 AND <choose row>;
+--
+-- Agent finder / station lists: see migration 20260425370000-juro_agent_finder_and_chr_type.sql
+--   (excludedFromAgentSearch = 0, valid bloodline typeID) for debugging.
+--
+-- After this, CQ remote avatar uses protocol charID = missionAgentID so the Crucible client can treat
+-- the entity like a normal station agent (right-click → conversation) when the UI allows it for that charID.

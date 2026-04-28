@@ -2469,7 +2469,7 @@ PyRep* CorporationDB::GetKillsAndLosses(uint32 corpID, uint32 number, uint32 off
         "  solarSystemID,"
         "  victimCharacterID,"
         "  victimCorporationID,"
-        "  victimAllianceID,"
+        "  CASE WHEN victimAllianceID < 0 THEN 0 ELSE victimAllianceID END AS victimAllianceID,"
         "  victimFactionID,"
         "  victimShipTypeID,"
         "  finalCharacterID,"
@@ -2483,9 +2483,11 @@ PyRep* CorporationDB::GetKillsAndLosses(uint32 corpID, uint32 number, uint32 off
         "  victimDamageTaken,"
         "  finalSecurityStatus,"
         "  finalDamageDone,"
-        "  moonID"
+        "  IFNULL(NULLIF(moonID, 0), solarSystemID) AS moonID"
         " FROM chrKillTable"
-        " WHERE victimCorporationID = %u OR finalCorporationID = %u", corpID, corpID))
+        " WHERE victimCorporationID = %u OR finalCorporationID = %u"
+        " ORDER BY killTime DESC"
+        " LIMIT %u OFFSET %u", corpID, corpID, number, offset))
     {
         codelog(CORP__DB_ERROR, "Error on query: %s", res.error.c_str());
         return nullptr;
@@ -2545,6 +2547,46 @@ void CorporationDB::GetCorpData(CorpData& data)
     data.name = row.GetText(4);
     data.ticker = row.GetText(5);
     /** @todo do we want to put shares here? */
+}
+
+uint32 CorporationDB::GetCorporationWarFactionID(uint32 corpID)
+{
+    if (corpID == 0)
+        return 0;
+
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT warFactionID FROM crpCorporation WHERE corporationID = %u",
+        corpID)) {
+        codelog(DATABASE__ERROR, "GetCorporationWarFactionID failed for %u: %s", corpID, res.error.c_str());
+        return 0;
+    }
+
+    DBResultRow row;
+    if (!res.GetRow(row) || row.IsNull(0))
+        return 0;
+
+    return row.GetUInt(0);
+}
+
+uint32 CorporationDB::GetCorporationAllianceID(uint32 corpID)
+{
+    if (corpID == 0)
+        return 0;
+
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT allianceID FROM crpCorporation WHERE corporationID = %u",
+        corpID)) {
+        codelog(DATABASE__ERROR, "GetCorporationAllianceID failed for %u: %s", corpID, res.error.c_str());
+        return 0;
+    }
+
+    DBResultRow row;
+    if (!res.GetRow(row) || row.IsNull(0))
+        return 0;
+
+    return row.GetUInt(0);
 }
 
 void CorporationDB::UpdateCorpHQ(uint32 corpID, uint32 stationID)

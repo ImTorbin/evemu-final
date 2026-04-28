@@ -16,6 +16,9 @@ because Crucible loads its Python out of an encrypted, signed
 | `scripts/11_decompile_client.ps1` | Runs `evedec` then `uncompyle2`/`uncompyle6` over the dumped tree. |
 | `scripts/12_grep_modules.ps1` | Greps the decompiled tree for the four real module paths the plan needs you to confirm. |
 | `scripts/40_rebuild_client.ps1` | `evecc compilecode` + `blue_patcher` to produce a new `compiled.code` and a CRC-disabled `blue.dll`. |
+| `scripts/44_restore_vanilla_compiled_code.ps1` | Undo client Python mods: restore `compiled.code` from `compiled.code.crucible_orig` and (when EVE is closed) `blue.dll` from `blue.dll.pre_evecc_pubkey`. |
+| `scripts/42_patch_blue_manifest.ps1` | Second `blue.dll` patch: bypass `VerifyManifestFile` (community `blue_patcher` alone still yields `Signature check failed` on some builds). Run with EVE closed; `40` invokes this automatically after install. |
+| `scripts/43_patch_blue_evecc_pubkey.ps1` | Replace embedded `ccp.keys.pub` in `blue.dll` with `tools\evecc.keys.pub` so `CryptVerifySignature` accepts your `evecc`-signed `compiled.code`. Required for many builds even after JNZ patches; `40` runs it after `42`. |
 | `scripts/50_two_client_smoke.md` | The two-client verification checklist. |
 | `sql/locationScenes_helper.sql` | Idempotent verification + seed helper for `locationScenes` (the table that maps station / system → CQ scene). |
 | `eve/client/script/environment/sharedCQ.py` | The new client service `svc.sharedCQClient`. **This is the core of the mod.** |

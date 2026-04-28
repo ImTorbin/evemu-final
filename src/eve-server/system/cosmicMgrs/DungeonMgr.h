@@ -32,6 +32,8 @@ public:
     int Initialize();
 
     void GetRandomDungeon(Dungeon::Dungeon& dungeon, uint8 archetype);
+    /** Cosmic combat anomalies (archetype 7): pick a dungeon matching faction and EVE sec-band rules; may relax sec if pool empty. */
+    void GetRandomCombatAnomalyDungeon(Dungeon::Dungeon& dungeon, uint8 archetype, float mapSecurityStatus, uint32 ownerFactionID);
     void GetDungeon(Dungeon::Dungeon& dungeon, uint32 dungeonID);
     void UpdateDungeon(uint32 dungeonID);
     void GetDungeons(std::vector<Dungeon::Dungeon>& dunList);
@@ -83,6 +85,14 @@ public:
 
     bool MakeDungeon(CosmicSignature& sig, uint32 dungeonID = 0);
 
+    /** Called when every dungeon-tagged NPC for a live site has been killed. May spawn an escalation. */
+    void OnDungeonCombatCleared(uint32 dungeonAnomalyItemID);
+
+    /** If this anomaly uses wave mode and another wave (or commander) should spawn, do it and return true. */
+    bool TrySpawnNextAnomalyWave(uint32 dungeonAnomalyItemID);
+
+    void SpawnAnomalyTypeNearAnchor(Dungeon::LiveDungeon& ld, uint16 groupID, uint8 count, bool commanderWave);
+
 protected:
     ManagerDB m_db;
 
@@ -99,6 +109,12 @@ private:
 
     int8 GetFaction(uint32 factionID);
     int8 GetRandLevel();
+
+    void SpawnAnomalyWaveRats(Dungeon::LiveDungeon& ld, uint8 waveIndex);
+    void SpawnAnomalyCommanderRats(Dungeon::LiveDungeon& ld);
+
+    /** Remove anchor + room entities, dungeon tracking, DB row, and anomaly/signature maps (via entity Delete). */
+    void RemoveCompletedDungeonSite(uint32 dungeonAnomalyItemID);
 
     std::map<uint32, Dungeon::LiveDungeon> m_dungeonList; // This holds all live dungeons in the current system
 };

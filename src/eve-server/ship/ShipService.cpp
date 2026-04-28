@@ -166,7 +166,7 @@ PyResult ShipBound::Board(PyCallArgs &call, PyInt* newShipID, std::optional<PyIn
     if (!pShipSE->GetShipItemRef()->ValidateBoardShip(pClient->GetChar()))
         throw CustomError ("You do not have the skills to fly a %s.", pShipSE->GetName());
 
-    float distance = pClient->GetShipSE()->GetPosition().distance(pShipSE->GetPosition());
+    float distance = static_cast<float>(pClient->GetShipSE()->GetAuthPosition().distance(pShipSE->GetAuthPosition()));
     // fudge for radii ?
     if (distance > sConfig.world.shipBoardDistance)
         throw CustomError ("You are too far from %s to board it.<br>You must be within %u meters to board this ship.",\
@@ -617,7 +617,15 @@ PyResult ShipBound::Drop(PyCallArgs &call, PyList* PyToDropList, std::optional <
             case EVEDB::invCategories::Celestial: { //Outpost construction platforms
                 if (iRef->groupID() == EVEDB::invGroups::Construction_Platform) {
                     // Get current planet to anchor platform on
+                    if (pClient->GetShipSE() == nullptr) {
+                        pClient->SendErrorMsg("You must be in a ship to deploy a construction platform.");
+                        return nullptr;
+                    }
                     uint32 planetID = pSystem->GetClosestPlanetID(pClient->GetShipSE()->GetPosition());
+                    if (planetID == 0) {
+                        pClient->SendErrorMsg("Unable to find a planet in this system to anchor the platform.");
+                        return nullptr;
+                    }
 
                     // Checks to see if we can deploy the platform
                     // Our alliance must have sovereignty in the system to deploy an outpost

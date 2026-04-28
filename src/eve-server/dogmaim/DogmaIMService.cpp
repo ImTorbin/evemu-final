@@ -223,19 +223,46 @@ PyResult DogmaIMBound::LoadAmmoToModules(PyCallArgs& call, PyInt* shipID, PyList
 
     if (moduleIDs.empty())
         return nullptr;
-    if (moduleIDs.size() > 1) {
-        sLog.Error("DogmaIMBound::Handle_LoadAmmoToModules()", "args.moduleIDs.size = %lu.", moduleIDs.size() );
-        call.Dump(MODULE__WARNING);
-    }
 
-    // Get Reference to Ship and Charge
     ShipItemRef sRef = call.client->GetShip();
-    GenericModule* pMod = sRef->GetModule(sItemFactory.GetItemRef(moduleIDs[0])->flag());
+    InventoryItemRef mRef0 = sItemFactory.GetItemRef(moduleIDs[0]);
+    if (mRef0.get() == nullptr)
+        throw UserError ("ModuleNoLongerPresentForCharges");
+
+    GenericModule* pMod = sRef->GetModule(mRef0->flag());
     if (pMod == nullptr)
         throw UserError ("ModuleNoLongerPresentForCharges");
 
-    InventoryItemRef cRef = sItemFactory.GetItemRef(itemID->value());
-    sRef->LoadCharge(cRef, pMod->flag());
+    // Grouped turrets/launchers: client may send multiple module IDs, or a single ID for the
+    // master while slaves stay empty — expand to the full weapon group and pull from the same
+    // cargo stack each time (LoadCharge Split leaves remainder on the original itemID).
+    std::vector<GenericModule*> loadOrder;
+    if (pMod->IsLinked()) {
+        sRef->GetLinkedWeaponMods(pMod->flag(), loadOrder);
+        if (is_log_enabled(MODULE__TRACE))
+            _log(MODULE__TRACE, "LoadAmmoToModules: linked group %zu hardpoints (client sent %zu module IDs).",
+                loadOrder.size(), moduleIDs.size());
+    } else if (moduleIDs.size() > 1) {
+        for (int32 mid : moduleIDs) {
+            InventoryItemRef mRef = sItemFactory.GetItemRef(mid);
+            if (mRef.get() == nullptr)
+                continue;
+            GenericModule* m = sRef->GetModule(mRef->flag());
+            if (m != nullptr)
+                loadOrder.push_back(m);
+        }
+        if (loadOrder.empty())
+            loadOrder.push_back(pMod);
+    } else {
+        loadOrder.push_back(pMod);
+    }
+
+    for (GenericModule* slotMod : loadOrder) {
+        InventoryItemRef cRef = sItemFactory.GetItemRef(itemID->value());
+        if (cRef.get() == nullptr || cRef->quantity() < 1)
+            break;
+        sRef->LoadCharge(cRef, slotMod->flag());
+    }
 
     // returns nodeID and timestamp
     return this->GetOID();
@@ -343,7 +370,7 @@ PyResult DogmaIMBound::AddTarget(PyCallArgs& call, PyInt* targetID) {
     }
     if (mySE->SysBubble()->HasTower()) {
         TowerSE* ptSE = mySE->SysBubble()->GetTowerSE();
-        if (ptSE->HasForceField() && mySE->GetPosition().distance(ptSE->GetPosition()) < ptSE->GetSOI())
+        if (ptSE->HasForceField() && mySE->GetAuthPosition().distance(ptSE->GetAuthPosition()) < ptSE->GetSOI())
                 throw UserError ("DeniedTargetingInsideField")
                         .AddFormatValue ("target", new PyInt (targetID->value()));
     }
@@ -426,7 +453,7 @@ PyResult DogmaIMBound::AddTarget(PyCallArgs& call, PyInt* targetID) {
                     .AddFormatValue ("target", new PyInt (targetID->value()));
     if (tSE->SysBubble()->HasTower()) {
         TowerSE* ptSE = tSE->SysBubble()->GetTowerSE();
-        if (ptSE->HasForceField() && tSE->GetPosition().distance(ptSE->GetPosition()) < ptSE->GetSOI())
+        if (ptSE->HasForceField() && tSE->GetAuthPosition().distance(ptSE->GetAuthPosition()) < ptSE->GetSOI())
                 throw UserError ("DeniedTargetForceField")
                         .AddFormatValue ("target", new PyInt (targetID->value()))
                         .AddFormatValue ("range", new PyInt (ptSE->GetSOI ()))
@@ -461,7 +488,7 @@ PyResult DogmaIMBound::RemoveTarget(PyCallArgs& call, PyInt* targetID) {
 
     if (sConfig.debug.IsTestServer)
         if (is_log_enabled(TARGET__MESSAGE)) {
-            GVector vectorToTarget(pClient->GetShipSE()->GetPosition(), pTSE->GetPosition());
+            GVector vectorToTarget(pClient->GetShipSE()->GetAuthPosition(), pTSE->GetAuthPosition());
             _log(TARGET__MESSAGE, "Handle_RemoveTarget() - Removed %s(%u) - Range to Target: %.2f meters.", \
                         pTSE->GetName(),pTSE->GetID(), vectorToTarget.length() );
         }

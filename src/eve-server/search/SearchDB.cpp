@@ -58,6 +58,7 @@ PyRep *SearchDB::Query(std::string string, std::vector<int> *searchID, uint32 ch
                     "   characterID AS agentID"
                     " FROM chrNPCCharacters"
                     " WHERE characterName LIKE '%s' "
+                    "   AND (COALESCE(excludedFromAgentSearch, 0) = 0)"
                     " LIMIT 0, 10", string.c_str() );
                 id = "agentID";
                 break;
@@ -166,6 +167,7 @@ PyRep *SearchDB::QuickQuery(std::string string, std::vector<int> *searchID, uint
                     "SELECT characterID"
                     " FROM chrNPCCharacters"
                     " WHERE characterName LIKE '%s' "
+                    "   AND (COALESCE(excludedFromAgentSearch, 0) = 0)"
                     " LIMIT 0, 10", string.c_str() );
                 break;
             case 2: //searchResultCharacter = 2

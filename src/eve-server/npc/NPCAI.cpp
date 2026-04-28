@@ -110,6 +110,20 @@ NPCAIMgr::NPCAIMgr(NPC* who)
     // some npcs have flyRange > boostRange.  this corrects it. (extends boost range)
     if (m_flyRange > m_boostRange)
         m_boostRange += m_boostRange + m_flyRange;
+    // Zero fly/chase attrs are common in SDE; without defaults CheckDistance never reaches Engaged and
+    // flips Goto/Follow at the boost boundary every tick (client sees violent jitter).
+    if (!m_flyRange) {
+        m_flyRange = (m_optimalRange > 1500 ? m_optimalRange / 2 : 5000);
+        if (m_flyRange < 1500)
+            m_flyRange = 1500;
+    }
+    if (!m_boostRange) {
+        m_boostRange = m_flyRange * 4;
+        if (m_boostRange < 15000)
+            m_boostRange = 15000;
+    }
+    if (m_boostRange <= m_flyRange)
+        m_boostRange = m_flyRange * 3 + 5000;
     // max firing range   default:10000  (lowest in db is 1000)
     m_maxAttackRange = m_self->GetAttribute(AttrEntityAttackRange).get_uint32();
     // this should be set according to npc size.
@@ -271,7 +285,9 @@ void NPCAIMgr::Process() {
 
     if (m_warpOutTimer.Check(false)) {
         // disallow warpout if spawn has active respawn timer (spawn is being chained)
-        if (m_npc->GetSpawnMgr()->IsChaining(m_npc->SysBubble()->GetID())) {
+        SpawnMgr* smgr(m_npc->GetSpawnMgr());
+        SystemBubble* sb(m_npc->SysBubble());
+        if (smgr != nullptr && sb != nullptr && smgr->IsChaining(sb->GetID())) {
             m_state = NPCAI::State::Idle;
             m_warpOutTimer.Disable();
         }
@@ -287,11 +303,14 @@ void NPCAIMgr::Process() {
      */
     switch(m_state) {
         case NPCAI::State::Idle: {
+            SystemBubble* idleBubble(m_npc->SysBubble());
+            if (idleBubble == nullptr)
+                break;
             if (m_beginFindTarget.Check()) {
                 std::vector<Client*> clientVec;
                 clientVec.clear();
                 DestinyManager* pDestiny(nullptr);
-                m_npc->SysBubble()->GetPlayers(clientVec); // what about player drones?  yes...later
+                idleBubble->GetPlayers(clientVec); // what about player drones?  yes...later
                 for (auto cur : clientVec) {
                     if (cur->IsInvul())
                         continue;
@@ -310,7 +329,7 @@ void NPCAIMgr::Process() {
                         continue;
                     if (pDestiny->IsCloaked() or pDestiny->IsWarping())
                         continue;
-                    if (m_npc->GetPosition().distance(cur->GetShipSE()->GetPosition()) > m_sightRange)
+                    if (m_npc->GetAuthPosition().distance(cur->GetShipSE()->GetAuthPosition()) > m_sightRange)
                         continue;
 
                     Target(cur->GetShipSE());
@@ -393,12 +412,27 @@ void NPCAIMgr::WarpOut()
     if (pSys->PlayerCount()) {
         // pSys->GetAnomMgr();
         uint32 newBeltID = pSys->GetRandBeltID();
-        if (newBeltID == sBubbleMgr.GetBeltID(m_npc->SysBubble()->GetID()))
-            newBeltID = pSys->GetRandBeltID();
+        SystemBubble* warpBubble(m_npc->SysBubble());
+        if (warpBubble != nullptr) {
+            uint32 curBelt = sBubbleMgr.GetBeltID(warpBubble->GetID());
+            if (newBeltID == curBelt)
+                newBeltID = pSys->GetRandBeltID();
+        }
 
         SystemEntity* newSE = pSys->GetSE(newBeltID);
+        if (newSE == nullptr) {
+            _log(NPC__ERROR, "%s(%u): WarpOut aborted: GetSE beltID %u returned null.", \
+                 m_npc->GetName(), m_npc->GetID(), newBeltID);
+            m_state = NPCAI::State::Idle;
+            return;
+        }
         m_destiny->WarpTo(newSE->GetPosition());
-        m_npc->GetSpawnMgr()->MoveSpawn(m_npc, sBubbleMgr.FindBubble(newSE));
+        SpawnMgr* smgr(m_npc->GetSpawnMgr());
+        if (smgr != nullptr)
+            smgr->MoveSpawn(m_npc, sBubbleMgr.FindBubble(newSE));
+        else
+            _log(NPC__WARNING, "%s(%u): WarpOut: MoveSpawn skipped (no SpawnMgr on this NPC).", \
+                 m_npc->GetName(), m_npc->GetID());
     }
 }
 
@@ -480,7 +514,9 @@ void NPCAIMgr::SetChasing(SystemEntity* pSE) {
          m_npc->GetName(), m_npc->GetID(), pSE->GetName(), pSE->GetID());
     // target out of range to attack/follow, but within npc sight range....use mwd/ab if equiped
     m_destiny->SetMaxVelocity(m_maxSpeed);
-    m_destiny->GotoPoint(pSE->GetPosition());  //head towards target
+    // Follow() re-aims every movement tick; GotoPoint() never updates and left a stale point while
+    // SetChasing early-returned — huge corrections / jitter vs a moving player.
+    m_destiny->Follow(pSE, 0);
     m_state = NPCAI::State::Chasing;
     m_warpOutTimer.Disable();
 }
@@ -494,7 +530,13 @@ void NPCAIMgr::SetFollowing(SystemEntity* pSE) {
          m_npc->GetName(), m_npc->GetID(), pSE->GetName(), pSE->GetID());
     // too close to chase, but to far to engage
     m_destiny->SetMaxVelocity(m_orbitSpeed *2);
-    m_destiny->Follow(pSE, m_falloff);  //try to get inside falloff range
+    uint32 followDist = m_falloff + (m_npc->GetID() % 13u) * 120u;
+    uint32 followCap = m_falloff + 8000u;
+    if (m_boostRange > m_falloff + 500u)
+        followCap = m_boostRange - 500u;
+    if (followDist > followCap)
+        followDist = followCap;
+    m_destiny->Follow(pSE, followDist);
     m_state = NPCAI::State::Following;
     m_warpOutTimer.Disable();
 }
@@ -502,13 +544,27 @@ void NPCAIMgr::SetFollowing(SystemEntity* pSE) {
 void NPCAIMgr::SetEngaged(SystemEntity* pSE) {
     if (pSE == nullptr)
         return;
-    if ((m_state == NPCAI::State::Engaged) and m_destiny->IsOrbiting())
+    if ((m_state == NPCAI::State::Engaged)
+        and (sConfig.npc.EngagedUseOrbit ? m_destiny->IsOrbiting() : m_destiny->IsFollowing()))
         return;
     _log(NPC__AI_TRACE, "%s(%u): Begin engaging.  Target is %s(%u).", \
          m_npc->GetName(), m_npc->GetID(), pSE->GetName(), pSE->GetID());
     // actively fighting
     m_destiny->SetMaxVelocity(m_orbitSpeed);
-    m_destiny->Orbit(pSE, m_optimalRange);  //try to get inside orbit range
+    // Same optimal for every rat stacks them on one ring; spread commanded radius / standoff distance.
+    uint32 baseOrbit = m_optimalRange ? m_optimalRange : m_flyRange;
+    if (!baseOrbit)
+        baseOrbit = 5000;
+    uint32 orbitCmd = baseOrbit + (m_npc->GetID() % 19u) * 200u;
+    const uint32 orbitCap = (m_optimalRange && m_falloff > m_optimalRange)
+        ? (m_optimalRange + m_falloff / 2u + 1500u)
+        : (baseOrbit + 4000u);
+    if (orbitCmd > orbitCap)
+        orbitCmd = orbitCap;
+    if (sConfig.npc.EngagedUseOrbit)
+        m_destiny->Orbit(pSE, orbitCmd);
+    else
+        m_destiny->Follow(pSE, orbitCmd);
     m_state = NPCAI::State::Engaged;
     m_warpOutTimer.Disable();
 }
@@ -541,7 +597,8 @@ void NPCAIMgr::SetSignaling(SystemEntity* pSE) {
     //  start speedtanking while signaling.  (im sure this is cheating, but fuckem.)
     //  this state is only usable by higher-class npcs.
     m_destiny->SetMaxVelocity(m_orbitSpeed * 2);
-    m_destiny->Orbit(pSE, m_falloff);  //try to get outside orbit range
+    uint32 sigOrbit = m_falloff + (m_npc->GetID() % 11u) * 150u;
+    m_destiny->Orbit(pSE, sigOrbit);
     m_state = NPCAI::State::Signaling;
     m_warpOutTimer.Disable();
 }
@@ -550,7 +607,7 @@ void NPCAIMgr::CheckDistance(SystemEntity* pSE)
 {
     if (pSE == nullptr)
         return;
-    double dist = m_npc->GetPosition().distance(pSE->GetPosition());
+    double dist = m_npc->GetAuthPosition().distance(pSE->GetAuthPosition());
     if ((dist > m_sightRange) and (!m_npc->TargetMgr()->IsTargetedBy(pSE))) {
         _log(NPC__AI_TRACE, "%s(%u): CheckDistance: %s(%u) is too far away (%.0fm).  Return to Idle.", \
              m_npc->GetName(), m_npc->GetID(), pSE->GetName(), pSE->GetID(), dist);
@@ -565,12 +622,40 @@ void NPCAIMgr::CheckDistance(SystemEntity* pSE)
 
     m_isWandering = false;
 
-    if (dist < m_flyRange) {
-        SetEngaged(pSE);
-    } else if (dist < m_boostRange) {
-        SetFollowing(pSE);
+    // Hysteresis: recomputing Chasing/Following/Engaged from raw distance every Process() tic makes
+    // GotoPoint/Follow/Orbit fight as the ship crosses m_flyRange/m_boostRange — huge apparent lag/jumps.
+    const double fly = static_cast<double>(m_flyRange);
+    const double boost = static_cast<double>(m_boostRange);
+    // Wider band reduces rapid Chasing/Following/Engaged flapping (visible jitter) when ranges are tight
+    // (common on anomaly frigates / short falloff types). Scale with combat ranges on larger hulls.
+    const double h = std::max(5000.0, std::min(14000.0, 0.14 * boost + 0.1 * fly));
+    /* Engaged <-> Following swaps Follow()/Orbit() with different commanded radii — looks like teleporting if
+       dist oscillates around flyRange. Keep a thicker dead-zone than chase transitions (asymmetric thresholds). */
+    const double efOut = fly + (2.0 * h);   // Engaged → Following (was fly + h)
+    const double efIn = fly - (1.1 * h);    // Following → Engaged (was fly - h*0.5)
+
+    if (m_state == NPCAI::State::Engaged) {
+        if (dist > boost + h)
+            SetChasing(pSE);
+        else if (dist > efOut)
+            SetFollowing(pSE);
+    } else if (m_state == NPCAI::State::Following) {
+        if (dist > boost + h)
+            SetChasing(pSE);
+        else if (dist < efIn)
+            SetEngaged(pSE);
+    } else if (m_state == NPCAI::State::Chasing) {
+        if (dist < fly - h * 0.5)
+            SetEngaged(pSE);
+        else if (dist < boost - h * 0.5)
+            SetFollowing(pSE);
     } else {
-        SetChasing(pSE);
+        if (dist < fly)
+            SetEngaged(pSE);
+        else if (dist < boost)
+            SetFollowing(pSE);
+        else
+            SetChasing(pSE);
     }
 
     _log(NPC__AI_TRACE, "%s(%u): CheckDistance:  target: %s(%u), state: %s, dist: %.0fm, flyRange: %u, boostRange: %u.", \
@@ -632,17 +717,26 @@ void NPCAIMgr::Targeted(SystemEntity* pSE) {
                             m_npc->GetName(), m_npc->GetID(), pSE->GetName(), pSE->GetID());
                     SetIdle();
                 }
+            } else {
+                // Match Target(): without this, lock completes but Attack() never fires (main timer never started).
+                if (!m_mainAttackTimer.Enabled())
+                    m_mainAttackTimer.Start(m_attackSpeed);
+                if (!m_missileTimer.Enabled() and (m_launcherCycleTime > 100))
+                    m_missileTimer.Start(m_launcherCycleTime);
+                CheckDistance(pSE);
             }
             m_beginFindTarget.Disable();
-            //CheckDistance(pAgressor);
         } break;
 
         /** @todo  determine if new targetedby entity is weaker than current target. use optimalSigRadius to test for 'optimal' target */
-        case NPCAI::State::Chasing: {
-        } break;
-        case NPCAI::State::Following: {
-        } break;
+        case NPCAI::State::Chasing:
+        case NPCAI::State::Following:
         case NPCAI::State::Engaged: {
+            if (!m_npc->TargetMgr()->HasNoTargets() and !m_mainAttackTimer.Enabled()) {
+                m_mainAttackTimer.Start(m_attackSpeed);
+                if (!m_missileTimer.Enabled() and (m_launcherCycleTime > 100))
+                    m_missileTimer.Start(m_launcherCycleTime);
+            }
         } break;
         case NPCAI::State::Fleeing: {
         } break;
@@ -687,7 +781,8 @@ void NPCAIMgr::Attack(SystemEntity* pSE)
         return;
     if (m_mainAttackTimer.Check()) {
         // Check to see if the target still in the bubble (Client warped out)
-        if (!m_npc->SysBubble()->InBubble(pSE->GetPosition())) {
+        SystemBubble* atkBubble(m_npc->SysBubble());
+        if (atkBubble == nullptr || !atkBubble->InBubble(pSE->GetAuthPosition())) {
             _log(NPC__AI_TRACE, "%s(%u): Target %s(%u) no longer in bubble.  Clear target and move on",
                     m_npc->GetName(), m_npc->GetID(), pSE->GetName(), pSE->GetID());
             m_missileTimer.Disable();
@@ -774,7 +869,7 @@ void NPCAIMgr::LaunchMissile(uint16 typeID, SystemEntity* pSE)
     // Actually Launch a missile, creating a new Destiny object for it
     // ItemData( uint32 _typeID, uint32 _ownerID, uint32 _locationID, EVEItemFlags _flag, const char *_name = "", \
               const GPoint &_position = NULL_ORIGIN, const char *_customInfo = "", bool _contraband = false);
-    ItemData idata(typeID, m_npc->GetID(), m_npc->GetLocationID(), flagMissile, "NPC Missile", m_npc->GetPosition());
+    ItemData idata(typeID, m_npc->GetID(), m_npc->GetLocationID(), flagMissile, "NPC Missile", m_npc->GetAuthPosition());
     InventoryItemRef missileRef = sItemFactory.SpawnItem(idata);
     if (missileRef.get() == nullptr)
         return;  // make error here
@@ -796,7 +891,7 @@ void NPCAIMgr::LaunchMissile(uint16 typeID, SystemEntity* pSE)
     Missile* pMissile = new Missile(missileRef, pSystem->GetServiceMgr(),  pSystem, m_self, pSE, m_npc);
     if (pMissile == nullptr)
         return; // make error here
-    double distance = pMissile->GetPosition().distance(pSE->GetPosition());
+    double distance = pMissile->GetAuthPosition().distance(pSE->GetAuthPosition());
     double missileSpeed = missileRef->GetAttribute(AttrMaxVelocity).get_float();
     double travelTime = (distance/missileSpeed);
     if (travelTime < 1)

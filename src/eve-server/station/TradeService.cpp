@@ -192,6 +192,7 @@ PyResult TradeBound::ToggleAccept(PyCallArgs &call, PyBool* newAccept) {
         ExchangeItems(pClient, pOther, pTSes);      // trade completed.
         m_TSvc->RemoveActiveSession(pTSes->m_tradeSession.myID);
         m_TSvc->RemoveActiveSession(pTSes->m_tradeSession.herID);
+        SafeDelete(pTSes);
         pClient->ClearTradeSession();
         pOther->ClearTradeSession();
     }
@@ -584,14 +585,33 @@ PyResult TradeService::InitiateTrade(PyCallArgs &call, PyInt* characterID) {
     Client* target(nullptr);
     if (call.client->GetTradeSession()) {
         target = sEntityList.FindClientByCharID( call.client->GetTradeSession()->m_tradeSession.herID );
-        call.client->SendErrorMsg("You are currently trading with %s.  You can only trade with one player at a time.", target->GetName());
+        if (target != nullptr)
+            call.client->SendErrorMsg("You are currently trading with %s.  You can only trade with one player at a time.", target->GetName());
+        else
+            call.client->SendErrorMsg("You are already in a trade session. Finish or cancel it first.");
         return nullptr;
     }
 
     target = sEntityList.FindClientByCharID( characterID->value() );
+    if (target == nullptr) {
+        call.client->SendErrorMsg("That pilot is not online.");
+        return nullptr;
+    }
+    if (target == call.client) {
+        call.client->SendErrorMsg("You cannot trade with yourself.");
+        return nullptr;
+    }
+    if (!sDataMgr.IsStation(call.client->GetStationID()) || call.client->GetStationID() != target->GetStationID()) {
+        call.client->SendErrorMsg("You must be docked in the same station as the other pilot to trade.");
+        return nullptr;
+    }
     if (target->GetTradeSession()) {
-        Client* otarget = sEntityList.FindClientByCharID( call.client->GetTradeSession()->m_tradeSession.herID );
-        call.client->SendErrorMsg("%s is currently trading with %s.  Try again later.", target->GetName(), otarget->GetName());
+        TradeSession* ts = target->GetTradeSession();
+        const uint32 partnerID = (ts->m_tradeSession.myID == target->GetCharacterID())
+            ? ts->m_tradeSession.herID : ts->m_tradeSession.myID;
+        Client* partner = sEntityList.FindClientByCharID(partnerID);
+        const char* partnerName = (partner != nullptr) ? partner->GetName() : "another pilot";
+        call.client->SendErrorMsg("%s is currently trading with %s. Try again later.", target->GetName(), partnerName);
         return nullptr;
     }
 

@@ -23,6 +23,12 @@ if [ ! -f "/app/etc/devtools.raw" ]; then
     cp /src/utils/config/devtools.raw /app/etc/
 fi
 
+# Host volume ./config often contains a raw repo copy with literal "database_host" — server then cannot reach MariaDB.
+if [ -f /app/etc/eve-server.xml ] && grep -q 'database_host' /app/etc/eve-server.xml; then
+    echo "eve-server.xml still has database_host placeholder — replacing with db_init-processed template."
+    cp -f /src/utils/config/eve-server.xml /app/etc/eve-server.xml
+fi
+
 #Start eve-server
 echo "Starting eve-server..."
 cd /app/bin/

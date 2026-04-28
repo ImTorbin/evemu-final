@@ -561,6 +561,7 @@ SET( system_INCLUDE
      "${TARGET_INCLUDE_DIR}/system/Container.h"
      "${TARGET_INCLUDE_DIR}/system/Damage.h"
      "${TARGET_INCLUDE_DIR}/system/DestinyManager.h"
+     "${TARGET_INCLUDE_DIR}/system/OrbitKinematics.h"
      "${TARGET_INCLUDE_DIR}/system/IndexManager.h"
      "${TARGET_INCLUDE_DIR}/system/KeeperService.h"
      "${TARGET_INCLUDE_DIR}/system/ScenarioService.h"
@@ -587,6 +588,7 @@ SET( system_SOURCE
      "${TARGET_SOURCE_DIR}/system/Container.cpp"
      "${TARGET_SOURCE_DIR}/system/Damage.cpp"
      "${TARGET_SOURCE_DIR}/system/DestinyManager.cpp"
+     "${TARGET_SOURCE_DIR}/system/OrbitKinematics.cpp"
      "${TARGET_SOURCE_DIR}/system/IndexManager.cpp"
      "${TARGET_SOURCE_DIR}/system/KeeperService.cpp"
      "${TARGET_SOURCE_DIR}/system/ScenarioService.cpp"
@@ -630,6 +632,11 @@ SET( test_INCLUDE
     "${TARGET_INCLUDE_DIR}/testing/test.h")
 SET( test_SOURCE
     "${TARGET_SOURCE_DIR}/testing/test.cpp")
+
+SET( notify_INCLUDE
+     "${TARGET_INCLUDE_DIR}/notify/DiscordWebhook.h")
+SET( notify_SOURCE
+     "${TARGET_SOURCE_DIR}/notify/DiscordWebhook.cpp")
 
 SET( services_INCLUDE
      "${TARGET_INCLUDE_DIR}/services/Service.h"
@@ -685,6 +692,7 @@ SOURCE_GROUP( "src\\system"        FILES ${system_INCLUDE} )
 SOURCE_GROUP( "src\\system\\sov"   FILES ${system_sov_INCLUDE} )
 SOURCE_GROUP( "src\\system\\cosmicMgrs"  FILES ${system_managers_INCLUDE} )
 SOURCE_GROUP( "src\\system\\test"  FILES ${test_INCLUDE} )
+SOURCE_GROUP( "src\\notify"        FILES ${notify_INCLUDE} )
 
 SOURCE_GROUP( "src"                FILES ${SOURCE} )
 SOURCE_GROUP( "src\\account"       FILES ${account_SOURCE} )
@@ -724,6 +732,7 @@ SOURCE_GROUP( "src\\system"        FILES ${system_SOURCE} )
 SOURCE_GROUP( "src\\system\\sov"   FILES ${system_sov_SOURCE} )
 SOURCE_GROUP( "src\\system\\cosmicMgrs"  FILES ${system_managers_SOURCE} )
 SOURCE_GROUP( "src\\system\\test"  FILES ${test_SOURCE} )
+SOURCE_GROUP( "src\\notify"        FILES ${notify_SOURCE} )
 
 ADD_EXECUTABLE( "${TARGET_NAME}"
                 ${INCLUDE}                ${SOURCE}
@@ -764,6 +773,7 @@ ADD_EXECUTABLE( "${TARGET_NAME}"
                 ${system_sov_INCLUDE}     ${system_sov_SOURCE}
                 ${system_managers_INCLUDE} ${system_managers_SOURCE}
                 ${test_INCLUDE}           ${test_SOURCE}
+                ${notify_INCLUDE}          ${notify_SOURCE}
                 )
 
 target_precompile_headers( "${TARGET_NAME}" PUBLIC
@@ -771,6 +781,18 @@ target_precompile_headers( "${TARGET_NAME}" PUBLIC
 TARGET_INCLUDE_DIRECTORIES( "${TARGET_NAME}"
                             ${eve-common_INCLUDE_DIRS}
                             "${TARGET_INCLUDE_DIR}" )
+
+FIND_PACKAGE(CURL QUIET)
+IF(CURL_FOUND)
+    TARGET_COMPILE_DEFINITIONS( "${TARGET_NAME}" PRIVATE HAVE_LIBCURL=1 )
+    IF(TARGET CURL::libcurl)
+        TARGET_LINK_LIBRARIES( "${TARGET_NAME}" CURL::libcurl )
+    ELSE()
+        TARGET_INCLUDE_DIRECTORIES( "${TARGET_NAME}" PRIVATE ${CURL_INCLUDE_DIRS} )
+        TARGET_LINK_LIBRARIES( "${TARGET_NAME}" ${CURL_LIBRARIES} )
+    ENDIF()
+ENDIF()
+
 TARGET_LINK_LIBRARIES( "${TARGET_NAME}"
                        "eve-common" )
 

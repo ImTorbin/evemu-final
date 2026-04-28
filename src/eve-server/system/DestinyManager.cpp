@@ -28,6 +28,8 @@
 
 #include "EVEServerConfig.h"
 
+#include <cmath>
+
 #include "Client.h"
 #include "EntityList.h"
 
@@ -46,6 +48,7 @@
 #include "system/BubbleManager.h"
 #include "system/Container.h"
 #include "system/DestinyManager.h"
+#include "system/OrbitKinematics.h"
 #include "system/SystemBubble.h"
 #include "system/SystemManager.h"
 #include <cstdlib>
@@ -97,6 +100,8 @@ mvPacket(nullptr)
     m_degPerTic = 0.0f;
     m_orbitTime = 0.0f;
     m_orbitRadTic = 0.0f;
+    m_orbitPhaseOffsetRad = 0.0f;
+    m_orbitPhaseOriginMS = 0;
     m_timeFraction = 0.0f;
     m_prevSpeedFraction = 0.0f;
     m_userSpeedFraction = 0.0f;
@@ -123,10 +128,15 @@ mvPacket(nullptr)
     m_stateStamp = 0;
     m_lastPosBroadcast = 0;
     m_lastPosBroadcastMS = 0;
+    m_lastNpcMoveIntegrateMS = 0;
+    m_lastNpcGotoFollowBroadcastMS = 0;
     m_lastSelfSyncMS = 0;
     m_lastCloakProxCheck = 0;
     m_cloakMod = nullptr;
     m_preCloakMaxSpeed = 0.0f;
+
+    m_orbitPhase = DestinyOrbitPhase::None;
+    m_orbitHasPrevTargetPos = false;
 }
 
 DestinyManager::~DestinyManager() {
@@ -145,6 +155,26 @@ bool DestinyManager::IsMoving() {
     return (m_timeFraction > 0.002f);
 }
 
+float DestinyManager::GetSpeed()
+{
+    const double vx = double(m_velocity.x) * m_velocity.x + double(m_velocity.y) * m_velocity.y
+        + double(m_velocity.z) * m_velocity.z;
+    if (vx > 1.0)
+        return static_cast<float>(std::sqrt(vx));
+    if (m_maxShipSpeed > 0.001f)
+        return m_maxShipSpeed * m_activeSpeedFraction;
+    return 0.f;
+}
+
+float DestinyManager::GetSpeedFraction()
+{
+    if (m_maxShipSpeed > 0.001f) {
+        const float f = GetSpeed() / m_maxShipSpeed;
+        return (f > 1.5f ? 1.5f : f);
+    }
+    return m_activeSpeedFraction;
+}
+
 // this is called once per tic by SystemEntity::Process()
 void DestinyManager::Process() {
     double profileStartTime(GetTimeUSeconds());
@@ -161,7 +191,18 @@ void DestinyManager::Process() {
         //SendMovementPacket();
     }
 
-    ProcessState();
+    /* Piloted ships: subwarp/orbit/stop motion runs in ProcessHighFreqState() at DynamicDestinyMs
+     * with wall-clock dt in MoveObject — same path as NPCs. (Previously only 1Hz here, observers
+     * extrapolated from sparse snaps and diverged badly from server GetAuthPosition.)
+     * In-warp cruise (m_warpState set) still uses stamp-based ProcessState once per second —
+     * warp accel math keys off EntityList GetStamp(). Missiles stay 1Hz-only. */
+    if (mySE->HasPilot()) {
+        if (m_ballMode == Destiny::Ball::Mode::WARP && m_warpState != nullptr)
+            ProcessState();
+    } else if (m_ballMode == Destiny::Ball::Mode::MISSILE
+        || (m_ballMode == Destiny::Ball::Mode::WARP && m_warpState != nullptr)) {
+        ProcessState();
+    }
 
     // Proximity decloak check. Throttled so a cloaked ship in a crowded
     // bubble doesn't burn a full O(N) scan every tick (destiny is ~5 Hz).
@@ -177,6 +218,23 @@ void DestinyManager::Process() {
 
     if (sConfig.debug.UseProfiling)
         sProfiler.AddTime(Profile::destiny, GetTimeUSeconds() - profileStartTime);
+}
+
+void DestinyManager::ProcessHighFreqState() {
+    if (mySE->IsFrozen()) {
+        Halt();
+        return;
+    }
+    /* Pilots: integrate subwarp here. Skip in-warp tunnel (stamp-based physics in Process). */
+    if (m_ballMode == Destiny::Ball::Mode::MISSILE)
+        return;
+    if (m_ballMode == Destiny::Ball::Mode::WARP && m_warpState != nullptr)
+        return;
+
+    if (m_ticAlign)
+        m_ticAlign = false;
+
+    ProcessState();
 }
 
 void DestinyManager::ProcessState() {
@@ -298,8 +356,16 @@ void DestinyManager::SetSpeedFraction(float fraction/*1.0*/, bool startMovement/
     // this sets current speed fraction for object.
 
     // if orbiting, call Orbit() and let code reset the variables
-    if (m_orbiting != 0)
-        Orbit(m_targetEntity.second, m_targetDistance);
+    if (m_orbiting != 0) {
+        if (m_targetEntity.second != nullptr) {
+            Orbit(m_targetEntity.second, m_targetDistance);
+        } else {
+            // Halt() and some paths clear the target without ClearOrbit(); don't call Orbit(nullptr).
+            _log(DESTINY__WARNING, "Destiny::SetSpeedFraction() - %s(%u): m_orbiting=%u but orbit target is null; clearing orbit.",
+                mySE->GetName(), mySE->GetID(), m_orbiting);
+            ClearOrbit();
+        }
+    }
 
     if ((fraction == m_userSpeedFraction) and (!startMovement)) {
         // no change.
@@ -609,6 +675,8 @@ void DestinyManager::Stop() {
     PyTuple *up = du.Encode();
     SendSingleDestinyUpdate(&up);
     PyDecRef(up);
+    m_lastNpcMoveIntegrateMS = 0;
+    m_lastNpcGotoFollowBroadcastMS = 0;
 }
 
 void DestinyManager::Halt() {
@@ -639,6 +707,10 @@ void DestinyManager::Halt() {
     m_targetEntity.second = nullptr;
 
     ClearTurn();
+    // Must match Stop(): otherwise m_orbiting stays set and SetSpeedFraction() calls Orbit(nullptr).
+    ClearOrbit();
+    m_lastNpcMoveIntegrateMS = 0;
+    m_lastNpcGotoFollowBroadcastMS = 0;
 
     if (is_log_enabled(DESTINY__MOVE_TRACE))
         _log(DESTINY__MOVE_TRACE, "Destiny::Halt() - %s(%u): m_shipHeading: %.3f,%.3f,%.3f", \
@@ -673,7 +745,8 @@ void DestinyManager::CheckBump()
     // NOTE:  object's "massive = true" means it can bump/collide  (massive = solid)
 
     // initial implementation will ONLY check player ships for bumping.
-    std::vector<Client*> vPlayers;
+    thread_local std::vector<Client*> vPlayers;
+    vPlayers.clear();
     mySE->SysBubble()->GetPlayers(vPlayers);
     Client* pClient = mySE->GetPilot();
     GPoint pos(GetPosition());
@@ -683,7 +756,7 @@ void DestinyManager::CheckBump()
             continue;
         if (!cur->IsInSpace() || (cur->GetShipSE() == nullptr))
             continue;
-        distance = pos.distance(cur->GetShipSE()->GetPosition());
+        distance = pos.distance(cur->GetShipSE()->GetAuthPosition());
         distance -= (mySE->GetRadius() - cur->GetShipSE()->GetRadius());
         if (distance < BUMP_DISTANCE) {
             Bump(cur->GetShipSE());
@@ -831,7 +904,7 @@ void DestinyManager::MoveObject() {
     }
 
     float speed(0.0f);
-    std::string move = "";
+    const char* move = "";
 
     // keep timer in seconds.
     timeStamp = (GetTimeMSeconds() - m_moveTime) * 0.001f;
@@ -891,9 +964,7 @@ void DestinyManager::MoveObject() {
 
         if (m_accel) {
             // object still accelerating.
-            move = "accelerating";
-            if (m_turning)
-                move = "accelerating in turn";
+            move = m_turning ? "accelerating in turn" : "accelerating";
 
             if (m_prevSpeedFraction) {
                 /* accel from previous non-full speed
@@ -908,11 +979,7 @@ void DestinyManager::MoveObject() {
             }
         } else if (m_decel) {
             // object still decelerating.
-            move = "decelerating";
-            if (m_turning) {
-                // decel for turn
-                move = "decelerating for turn";
-            }
+            move = m_turning ? "decelerating for turn" : "decelerating";
             if (m_prevSpeedFraction) {
                 // asf = psf - (psf - usf) * tf
                 m_activeSpeedFraction = m_prevSpeedFraction - (m_prevSpeedFraction - m_userSpeedFraction) * m_timeFraction;
@@ -970,25 +1037,75 @@ void DestinyManager::MoveObject() {
         }
     }
 
-    if (m_orbiting)
-        if (m_orbiting < Destiny::Ball::Orbit::TooClose) {
-            // object is orbiting...set orbit speed correctly.
-            speed *= m_maxOrbitSpeedFraction;
-            move += " in orbit";
+    bool ringOrbitKinematic = false;
+    if (m_ballMode == Destiny::Ball::Mode::ORBIT && m_orbitPhase == DestinyOrbitPhase::OnRing
+        && m_targetEntity.second != nullptr
+        && m_orbitRadTic > 0.0f) {
+        // NPCs: ring motion is kinematic (Orbit() sets phase); don't let the subwarp accel curve
+        // carry a stale m_activeSpeedFraction — observers already got inconsistent vel vs position.
+        if (!mySE->HasPilot()) {
+            m_accel = false;
+            m_decel = false;
+            m_timeFraction = 1.0f;
+            if (m_userSpeedFraction > 0.001f)
+                m_activeSpeedFraction = m_userSpeedFraction;
+        }
+        // Orbit() already snaps m_position onto the ring each tick; speed must match omega*r so
+        // SetBallVelocity matches the path (accel curve vs fixed phase caused client jitter).
+        const GPoint TpK = m_targetEntity.second->GetAuthPosition();
+        const double dx = m_position.x - TpK.x;
+        const double dz = m_position.z - TpK.z;
+        const double rHoriz = std::max(1.0, std::sqrt(dx * dx + dz * dz));
+        speed = static_cast<float>(rHoriz * static_cast<double>(m_orbitRadTic));
+        ringOrbitKinematic = true;
     }
 
+    if (m_orbiting)
+        if (m_orbiting < Destiny::Ball::Orbit::TooClose && !ringOrbitKinematic) {
+            // object is orbiting...set orbit speed correctly.
+            speed *= m_maxOrbitSpeedFraction;
+        }
+
     if (is_log_enabled(DESTINY__MOVE_TRACE)) {
+        const char* moveTag = move;
+        thread_local char orbitMoveTag[96];
+        if (m_orbiting && m_orbiting < Destiny::Ball::Orbit::TooClose) {
+            snprintf(orbitMoveTag, sizeof(orbitMoveTag), "%s in orbit", move);
+            moveTag = orbitMoveTag;
+        }
         if (m_prevSpeedFraction) {
             _log(DESTINY__MOVE_TRACE, "Destiny::MoveObject() - %s(%u) is %s at %.3f m/s (tf:%.4f asf:%.4f ps:%.2f psf:%.4f, sec: %.5f).", \
-                mySE->GetName(), mySE->GetID(), move.c_str(), speed, m_timeFraction, m_activeSpeedFraction, m_prevSpeed, m_prevSpeedFraction, timeStamp);
+                mySE->GetName(), mySE->GetID(), moveTag, speed, m_timeFraction, m_activeSpeedFraction, m_prevSpeed, m_prevSpeedFraction, timeStamp);
         } else {
             _log(DESTINY__MOVE_TRACE, "Destiny::MoveObject() - %s(%u) is %s at %.3f m/s (tf:%.4f asf:%.4f sec: %.5f).", \
-                mySE->GetName(), mySE->GetID(), move.c_str(), speed, m_timeFraction, m_activeSpeedFraction, timeStamp);
+                mySE->GetName(), mySE->GetID(), moveTag, speed, m_timeFraction, m_activeSpeedFraction, timeStamp);
         }
     }
 
     //set velocity and position for this tic
     m_velocity = m_shipHeading * speed;
+
+    // MoveObject runs at DynamicDestinyMs for all movers (pilots included); m_velocity is m/s — scale by wall dt.
+    float posDt = 1.0f;
+    {
+        uint16 nominalMs(sConfig.server.DynamicDestinyMs);
+        if (nominalMs < 10)
+            nominalMs = 10;
+        else if (nominalMs > 100)
+            nominalMs = 100;
+        const float nominalDt = static_cast<float>(nominalMs) * 0.001f;
+        const double nowMs = GetTimeMSeconds();
+        if (m_lastNpcMoveIntegrateMS != 0u) {
+            posDt = static_cast<float>((nowMs - static_cast<double>(m_lastNpcMoveIntegrateMS)) * 0.001);
+            if (posDt < 0.002f)
+                posDt = 0.002f;
+            if (posDt > 0.125f)
+                posDt = 0.125f;
+        } else {
+            posDt = nominalDt;
+        }
+        m_lastNpcMoveIntegrateMS = static_cast<uint32>(nowMs);
+    }
 
     // Position sync strategy:
     //  - PositionHack (debug): broadcast every tick to all clients.
@@ -1008,13 +1125,28 @@ void DestinyManager::MoveObject() {
     bool syncObservers = sConfig.debug.PositionHack || !mySE->HasPilot();
     if (!syncObservers) {
         const uint32 nowMS = static_cast<uint32>(GetTimeMSeconds());
-        if ((nowMS - m_lastPosBroadcastMS) >= 100) {
+        if ((nowMS - m_lastPosBroadcastMS) >= 50) {
             syncObservers = true;
             m_lastPosBroadcastMS = nowMS;
             m_lastPosBroadcast = sEntityList.GetStamp();
         }
     }
-    SetPosition(m_position + m_velocity, syncObservers);
+    // Ring orbit: Orbit() already placed m_position on the circle. Adding m_velocity here
+    // applied an extra ~1s step every tick (desync / jitter vs CmdOrbit). Approach phases use
+    // TooClose/TooFar and still integrate with +m_velocity.
+    //
+    // Non-pilot motion runs at EntityList dynamic destiny (see DynamicDestinyMs, default ~17 ms ~60/s).
+    // Sub-interval observer throttles on piloted ships skipped net sync on some ticks ...
+    // Broadcast every high-freq step when syncObservers is already true; piloted ships still use
+    // the 50ms gate above.
+    const bool orbitNetSync = syncObservers;
+
+    if (m_ballMode == Destiny::Ball::Mode::ORBIT && m_orbitPhase == DestinyOrbitPhase::OnRing) {
+        SetPosition(m_position, orbitNetSync);
+    } else {
+        const bool subwarpNetSync = syncObservers;
+        SetPosition(m_position + (m_velocity * posDt), subwarpNetSync);
+    }
 
     if (is_log_enabled(DESTINY__MOVE_DEBUG))
         _log(DESTINY__MOVE_DEBUG, "Destiny::MoveObject() - %s(%u) Pos:%.2f,%.2f,%.2f  Vel:%.3f,%.3f,%.3f  Head:%.3f,%.3f,%.3f", \
@@ -1259,9 +1391,13 @@ void DestinyManager::Follow() {
         }
     }
 
-    const GPoint& target_point = m_targetEntity.second->GetPosition();
+    const GPoint target_point = m_targetEntity.second->GetAuthPosition();
     GVector heading(m_position, target_point);
-    m_targetDistance = (uint32)(heading.length() - m_radius);
+    const double edgeDist = heading.length() - static_cast<double>(m_radius);
+    if (edgeDist <= 0.0)
+        m_targetDistance = 0;
+    else
+        m_targetDistance = static_cast<uint32>(edgeDist);
 
     if (m_targetDistance < m_followDistance) {
         if (mySE->HasPilot())
@@ -1287,12 +1423,18 @@ void DestinyManager::Follow() {
             m_activeSpeedFraction = m_userSpeedFraction = m_timeFraction = m_prevSpeedFraction = 0.0f;
             return;
         } else {
-            if ((m_targetEntity.second->IsDynamicEntity()) and (m_targetEntity.second->DestinyMgr()->IsMoving())) {
+            DestinyManager* tdm = m_targetEntity.second->DestinyMgr();
+            if ((m_targetEntity.second->IsDynamicEntity()) and (tdm != nullptr) and tdm->IsMoving()) {
                 // this will mimic real movement, where ship will decel instead of a sudden halt
                 //  still need to call MoveObject() here
                 SetSpeedFraction(0.2);
             } else {
-                Stop();
+                /* NPCs/drones: Stop() clears FOLLOW; AI then re-issues Follow/Orbit every tick —
+                 * jerk and lost standoff rings. Idle down without dropping FOLLOW/CmdFollowBall. */
+                if (mySE->IsDroneSE() || mySE->IsNPCSE())
+                    SetSpeedFraction(mySE->IsDroneSE() ? 0.15f : 0.18f);
+                else
+                    Stop();
             }
         }
     } else {
@@ -1330,6 +1472,12 @@ Prediction service for in-space flight
 """
 */
 void DestinyManager::Orbit() {
+    if (m_targetEntity.second == nullptr) {
+        _log(DESTINY__WARNING, "Destiny::Orbit() tic - %s(%u): no orbit target; stopping.", mySE->GetName(), mySE->GetID());
+        Stop();
+        return;
+    }
+    const uint8 orbitBandPrev = m_orbiting;
     // data consistency checks...
     if ((m_targetDistance > BUBBLE_RADIUS_METERS) or (m_followDistance > BUBBLE_RADIUS_METERS)) {
         // well, something fucked up.  stop object and throw error.   player can reset if they want to.
@@ -1366,33 +1514,68 @@ void DestinyManager::Orbit() {
      * edges = distance between object and target closest edges (counting for radius)
      *
      */
-
-    /** @todo  will have to set/reset orbit time once actual orbit is started for proper radian setting */
-    // get current times
-    uint32 timeStamp = sEntityList.GetStamp() - m_stateStamp;
     float Tr = m_targetEntity.second->GetRadius();
     //float Tm = m_targetEntity.second->GetSelf()->GetAttribute(AttrMass).get_float();
-    GPoint Tp(m_targetEntity.second->GetPosition());
+    GPoint Tp(m_targetEntity.second->GetAuthPosition());
+    if (Tp.isZero() or Tp.isNaN() or Tp.isInf())
+        Tp = m_targetEntity.second->GetPosition();
+    if (Tp.isZero() or Tp.isNaN() or Tp.isInf()) {
+        _log(DESTINY__WARNING, "Destiny::Orbit() tic - %s(%u): target %s(%u) has no valid position; stopping.",
+            mySE->GetName(), mySE->GetID(), m_targetEntity.second->GetName(), m_targetEntity.second->GetID());
+        Stop();
+        return;
+    }
+
+    // Warp / large target motion: reacquire ring without fighting old theta.
+    constexpr double kTargetJumpReacquire_m = 7500.0;
+    if (m_orbitHasPrevTargetPos) {
+        const double targJump = Tp.distance(m_orbitPrevTargetPos);
+        if (targJump > kTargetJumpReacquire_m) {
+            m_orbitPhase = DestinyOrbitPhase::Reacquire;
+            m_orbitPhaseOriginMS = static_cast<uint32>(GetTimeMSeconds());
+            const double jdx = m_position.x - Tp.x;
+            const double jdz = m_position.z - Tp.z;
+            m_orbitPhaseOffsetRad = static_cast<float>(std::atan2(jdz, jdx));
+            if (is_log_enabled(DESTINY__ORBIT_TRACE))
+                _log(DESTINY__ORBIT_TRACE, "orbit reacquire jump %.0fm", targJump);
+        }
+    }
+    m_orbitPrevTargetPos = Tp;
+    m_orbitHasPrevTargetPos = true;
 
     // current and edges are used to determine ship's orbit distance, and adjust position accordingly
     double centers(m_position.distance(Tp));
     double edges(centers - m_radius - Tr);
-    if (is_log_enabled(DESTINY__ORBIT_TRACE))
-        _log(DESTINY__ORBIT_TRACE, "1 - %s(%u): time:%u, centers:%.2f, edges:%.2f, target:%u, follow:%u", \
-            mySE->GetName(), mySE->GetID(), timeStamp, centers, edges, m_targetDistance, m_followDistance);
+    if (is_log_enabled(DESTINY__ORBIT_TRACE)) {
+        const double tOrbit = m_orbitPhaseOriginMS
+            ? (GetTimeMSeconds() - static_cast<double>(m_orbitPhaseOriginMS)) * 0.001
+            : static_cast<double>(sEntityList.GetStamp() - m_stateStamp);
+        _log(DESTINY__ORBIT_TRACE, "1 - %s(%u): tOrbit:%.3f, centers:%.2f, edges:%.2f, target:%u, follow:%u", \
+            mySE->GetName(), mySE->GetID(), tOrbit, centers, edges, m_targetDistance, m_followDistance);
+    }
 
     // distances checks for orbit calculations
     GPoint mPos(NULL_ORIGIN);
     float mPosAdj(0.0f);
-    // check distances for this tic
-    if ((edges / 2) > m_followDistance) {
-        if (m_orbiting == Destiny::Ball::Orbit::TooFar) {
+    /* Hysteresis on TooFar / TooClose: crossing one threshold every destiny tick flipped approach vs ring
+     * and caused visible pops. Separate enter/exit bands. */
+    const double halfEdge = edges * 0.5;
+    const double fd = static_cast<double>(m_followDistance);
+    const double closeMetric = centers + m_targetDistance / 3.0;
+    const double farEnterThresh = fd * 1.08;
+    const double farExitThresh = fd * 0.90;
+    const double closeEnterThresh = fd * 0.92;
+    const double closeExitThresh = fd * 1.08;
+
+    if (m_orbiting == Destiny::Ball::Orbit::TooFar) {
+        if (halfEdge > farExitThresh) {
             MoveObject();
             return;
         }
-        // too far to realistically orbit.
+    } else if (halfEdge > farEnterThresh
+        || (m_orbitPhase == DestinyOrbitPhase::Reacquire && halfEdge > farExitThresh)) {
         m_orbiting = Destiny::Ball::Orbit::TooFar;
-        // TODO: update this to determine orbit and set heading/target to smoothly go from turn into orbit trajectory
+        // Approach / Reacquire: steer inward with subwarp integration (theta below is skipped via early return).
         // set point to side of target (based on current position), to avoid near-zero angular velocity
         double radTarg = atan2(Tp.z - m_position.z, Tp.x - m_position.x);  // rad from '0' to target
         radTarg += atan2(m_followDistance, edges);  // rad from 'distance line' to target 'offset'
@@ -1409,18 +1592,21 @@ void DestinyManager::Orbit() {
         m_shipHeading = heading;    // this sets object velocity using speed
         _log(DESTINY__ORBIT_TRACE, "2 - way too far - rads:%.3f, heading: %.3f, %.3f, %.3f", \
                 radTarg, m_shipHeading.x, m_shipHeading.y, m_shipHeading.z);
+        if (m_orbitPhase == DestinyOrbitPhase::Reacquire)
+            m_orbitPhase = DestinyOrbitPhase::Approach;
         MoveObject();
         return;
-    } else if ( (centers + m_targetDistance / 3) < m_followDistance) {
-        if (m_orbiting == Destiny::Ball::Orbit::TooClose) {
+    }
+
+    if (m_orbiting == Destiny::Ball::Orbit::TooClose) {
+        if (closeMetric < closeExitThresh) {
             MoveObject();
             return;
         }
-        // to close to realistically orbit.  move away from target
+    } else if (closeMetric < closeEnterThresh) {
         m_orbiting = Destiny::Ball::Orbit::TooClose;
         // set point to side of target (based on current position), to avoid near-zero angular velocity
         double radTarg = atan2(Tp.z - m_position.z, Tp.x - m_position.x);  // rad from '0' to target
-        //radTarg += atan2(m_followDistance, edges);  // rad from 'distance line' to target 'offset'
         mPos.x = m_followDistance * cos(radTarg);
         mPos.z = m_followDistance * sin(radTarg);
         if (Tp.y > m_position.y) {  // target is above us.  set point below target using calculated distance
@@ -1453,160 +1639,71 @@ void DestinyManager::Orbit() {
         _log(DESTINY__ORBIT_TRACE, "2 - within tolerance");
     }
 
+    // Leaving Approach bands onto the analytic φ(t) ring.
+    if (orbitBandPrev == Destiny::Ball::Orbit::TooFar
+        || orbitBandPrev == Destiny::Ball::Orbit::TooClose) {
+        m_orbitPhaseOriginMS = static_cast<uint32>(GetTimeMSeconds());
+        const double dx = m_position.x - Tp.x;
+        const double dz = m_position.z - Tp.z;
+        m_orbitPhaseOffsetRad = static_cast<float>(std::atan2(dz, dx));
+    }
+
+    /** Orbit angle from wall-clock seconds so motion stays smooth between 1Hz server stamps. */
+    const double orbitElapsedSec = m_orbitPhaseOriginMS
+        ? (GetTimeMSeconds() - static_cast<double>(m_orbitPhaseOriginMS)) * 0.001
+        : static_cast<double>(sEntityList.GetStamp() - m_stateStamp);
+
     #define LogMacro(v) _log(DESTINY__ORBIT_TRACE, "m - " #v ": (%.3f, %.3f, %.3f)   len=%.3f", v.x, v.y, v.z, v.length())
 
-    // new orbit code
-    float radius = m_followDistance + mPosAdj;// fudge a bit as using targetDistance is a hair too close
-    // angle around y axis (from +x) - horizontal movement  - ccw from +x using ships orbit in rad/tic
-    float theta = EvE::Trig::Pi2 - EvE::Trig::Deg2Rad(360) - (m_orbitRadTic * timeStamp);
-    // angle around xz axis (from 0) - vertical movement
-    //GVector target(m_position, Tp);
-    //LogMacro(target);
-    //float hyp = sqrt(pow(target.z, 2) + pow(target.x, 2));
-    float inclination = 45; //atan(hyp / target.y);
-    // fractional value of orbit period (0 < x < 1)
-    float period = fmod(timeStamp, m_orbitTime) / m_orbitTime;
-    // calculate a pendulum value here to adjust elevation (+/-y) where +x is 1, 0x is 0, -x is -1
-    float c = cos(EvE::Trig::Deg2Rad(360 * period));
-    // get elevation modifier based on orbit period
-    float phi = EvE::Trig::Deg2Rad(inclination * c);
-    // set xz plane modifier from elevation
-    float s = sin(EvE::Trig::Deg2Rad(360 * period));
-    float mu = EvE::Trig::Deg2Rad(inclination * s);
-    // here we will adjust orbit plane by adding OrbitRotation angle to theta
-    // calculate position
-    mPos.x = radius /* mu */* cos( theta );
-    mPos.z = radius /* mu */* sin( theta );
-    mPos.y = radius * phi;
-    _log(DESTINY__ORBIT_TRACE, "4 - theta:%.5f, phi:%.3f, mu:%.2f period:%.5f, radius:%.3f, inc:%.5f", theta,phi,mu,period,radius,inclination);
+    m_orbitPhase = DestinyOrbitPhase::OnRing;
+
+    // Flat ring in target's horizontal plane (Y matches Tp). Old pendulum Y term mixed radians
+    // with radius and fought the client's CmdOrbit path.
+    float radius = m_followDistance + mPosAdj;
+    float theta = -(m_orbitRadTic * static_cast<float>(orbitElapsedSec)) + m_orbitPhaseOffsetRad;
+    mPos.x = radius * cos(theta);
+    mPos.z = radius * sin(theta);
+    mPos.y = 0;
+    _log(DESTINY__ORBIT_TRACE, "4 - theta:%.5f, radius:%.3f", theta, radius);
     LogMacro(mPos);
-    // apply origin to our calculated position
     mPos += Tp;
-    // set position for this tic
     m_position = mPos;
 
-    // set heading for this tic
-    GPoint mPosNext(NULL_ORIGIN);
-    theta += m_orbitRadTic;
-    period = fmod(timeStamp + 1, m_orbitTime) / m_orbitTime;
-    c = cos(EvE::Trig::Deg2Rad(360 * period));
-    phi = EvE::Trig::Deg2Rad(inclination * c);
-    mPosNext.x = radius * cos( theta );
-    mPosNext.z = radius * sin( theta );
-    mPosNext.y = radius * phi;
-    LogMacro(mPosNext);
-    // determine where our target should be next tic, and figure that into our heading calculation
-    float Tv = (m_targetEntity.second->DestinyMgr() != nullptr ? m_targetEntity.second->DestinyMgr()->GetSpeed() : 0);
-    GVector Th(m_targetEntity.second->DestinyMgr() != nullptr ? m_targetEntity.second->DestinyMgr()->GetHeading() : NULL_ORIGIN_V);
-    Tp += (Tv*Th); // use Tv*Th and add to position to account for target movement.  Tv for non-moving targets return 0.
-    mPosNext += Tp;
-    GVector heading(m_position, mPosNext);
+    // Ring tangent for θ = -ωt + φ: position (r cos θ, r sin θ) in XZ → d/dt aligns with (sin θ, 0, -cos θ).
+    // Do not use θ += m_orbitRadTic per ProcessState call — NPCs use ProcessHighFreqState (DynamicDestinyMs), players ~1 Hz; a fixed radian
+    // bump per call desynced heading from wall-clock phase and caused visible orbit jitter.
+    GVector heading(sin(theta), 0.0f, -cos(theta));
     heading.normalize();
     m_shipHeading = heading;
     m_targetPoint = m_position + (m_shipHeading * 1.0e16);
-    LogMacro( heading );
+    LogMacro(heading);
+
+    const double distFromTarget = m_position.distance(Tp);
+    if (!std::isfinite(distFromTarget) || distFromTarget > 1.0e8) {
+        _log(DESTINY__ERROR, "Destiny::Orbit() - %s(%u): invalid orbit distance %.0f m from target; stopping.",
+            mySE->GetName(), mySE->GetID(), distFromTarget);
+        Stop();
+        return;
+    }
 
     double curSpeed = m_maxSpeed * m_activeSpeedFraction * m_maxOrbitSpeedFraction;
     if (is_log_enabled(DESTINY__ORBIT_TRACE))
-        _log(DESTINY__ORBIT_TRACE, "5(%u) - orbiting at %.2f. timestamp:%u, speed:%.2f", \
-            m_orbiting, m_position.distance(Tp), timeStamp, curSpeed);
+        _log(DESTINY__ORBIT_TRACE, "5 phase%u band%u orbiting centers %.2f tOrb:%.3f spd:%.2f ω·r chk:%.2f", \
+            static_cast<unsigned>(m_orbitPhase), static_cast<unsigned>(orbitBandPrev), \
+            m_position.distance(Tp), orbitElapsedSec, curSpeed,
+            static_cast<float>(hypot((double)m_position.x - Tp.x, (double)m_position.z - Tp.z)) * std::fabs((double)m_orbitRadTic));
 
     MoveObject();
 }
 
-GPoint DestinyManager::ComputePosition(double curRad) {
-    /*
-     *   orbital definitions for EVEmu:
-     * node line = ascending node
-     * ascending node = line of intersection between orbit plane and reference plane, on the 'upward' side
-     * periapsis = closest point of orbit to target point
-     * apoapsis = farthest point of orbit to target point
-     * ecliptic = plane of orbit
-     * reference direction = line on reference plane inline with periapsis
-     *
-     *   primary orbital elements:
-     * Y = reference direction (vector on reference plane that lines up with periapsis)
-     * i = inclination to the positive ecliptic at node line
-     * a = semi-major axis, or mean distance to target.  this will adjust ship's orbit based on distance
-     * e = eccentricity (0=circle, 0-1=ellipse, 1=parabola)
-     * w = argument of periapsis, angle from the node line to the periapsis
-     * N = longitude of the ascending node (from Y, ccw to node line)
-     * NOTE: w + N = 360*
-     * M = mean anomaly, radians between our current position and periapsis.  increases uniformly with time from 0 to 2pi (360_deg)
-     *
-     *   calculated orbital elements:
-     * L  = M + p   = mean longitude, measure of how far around its orbit a body has progressed since passing the argument of periapsis (w)
-     * P  = orbital period,  time in seconds to complete one orbit (assuming all other variables remain constant)
-     * T  = Epoch_of_M - (M(deg)/360_deg) / P  = time of periapsis
-     * v  = true anomaly, position of the orbiting body along the orbit at a specific time, measured from w
-     * E  = eccentric anomaly, angle from target side of center point of line qQ, at which we are located
-     *
-     * Under ideal conditions of a perfectly spherical central body and zero perturbations,
-     *    all orbital elements except the mean anomaly (M) are constants.
-     *
-     * As we're using circular orbits, the reference direction (Y) will be +x
-     *
-     */
-
-    GPoint Tp(m_targetEntity.second->GetPosition());
-    //i = inclination to the positive ecliptic (plane of our orbit) at node line
-    double adj = sqrt(pow(m_position.x - Tp.x, 2) * pow(m_position.z - Tp.z, 2));
-    double opp = m_position.y - Tp.y;
-    double i = atan2(opp, adj);
-
-    /*  not needed yet, but here just in case...
-    // to determine orbiters position relative to target, use RA and dec (from their point of view, with vernal equinox being their heading)
-    // calculating right ascension (RA)
-    double A = cos(w) * cos(N) - sin(w) * sin(N) * cos(i);
-    double B = cos(cos(w) * cos(N) + sin(w) * sin(N) * cos(i)) - sin(sin(w) * sin(i));
-    double RA = atan2(B, A);
-    // calculating declination (dec)
-    double C = sin(cos(w) * cos(N) + sin(w) * sin(N) * cos(i)) + cos(sin(w) * sin(i));
-    double dec = asin(C);
-    */
-
-    GPoint mPos(NULL_ORIGIN);
-    // fig 8 on nw of targ sphere
-    float radius = m_targetDistance + (m_radius *2); // fudge a bit as using targetDistance is a hair too close
-    // angle around y axis (from +x) - horizontal movement  - cw from +x using ships orbit in rad/tic
-    float theta = m_orbitRadTic * 0/*timeStamp*/;
-    // angle around xz axis (from 0) - vertical movement
-    GVector target(m_position, Tp);
-    LogMacro(target);
-    float hyp = sqrt(pow(target.z, 2) + pow(target.x, 2));
-    float inclination = 45; //atan(hyp / target.y);
-    // fractional value of orbit period (0 < x < 1)
-    float period = fmod(0/*timeStamp*/, m_orbitTime) /m_orbitTime;
-    // calculate a pendulum value here to adjust elevation (+/-y) where +x is 1, 0x is 0, -x is -1
-    float c = cos(EvE::Trig::Deg2Rad(360 * period));
-    // get elevation modifier based on orbit period
-    float phi = EvE::Trig::Deg2Rad(inclination * c);
-    // set xz plane modifier from elevation
-    //float s = sin(EvE::Trig::Deg2Rad(360 * period));
-    //float mu = EvE::Trig::Deg2Rad(inclination * s);
-    // here we will adjust orbit plane by adding OrbitRotation angle to theta
-    // calculate position using trig.
-    mPos.x = radius /* mu */* cos( theta );
-    mPos.z = radius /* mu */* sin( theta );
-    mPos.y = radius * phi;
-
-    //_log(DESTINY__ORBIT_TRACE, "Destiny::ComputePosition() - a:%.5f, i:%.5f, v:%.5f, N:%.5f, M:%.5f, w:%.5f, e:%.5f, E:%f, P:%f", a,i,v,N,M,w,e,E,P);
-    //_log(DESTINY__ORBIT_TRACE, "Destiny::ComputePosition() - mPos(%.3f, %.3f, %.3f) - radius check %.3f, q:%.3f", mPos.x, mPos.y, mPos.z, r,q);
-
-    // position test
-    if (mPos.isNaN()) {
-        _log(DESTINY__ERROR, "mPos calculated as NaN.  Stopping Orbit.");
-        Stop();
-        return NULL_ORIGIN;
-    }
-    // get new position as reference to target
-    return mPos;
-}
-
 void DestinyManager::ClearOrbit() {
     m_orbiting = Destiny::Ball::Orbit::None;
+    m_orbitPhase = DestinyOrbitPhase::None;
+    m_orbitHasPrevTargetPos = false;
     m_orbitTime = 0.0f;
     m_orbitRadTic = 0.0f;
+    m_orbitPhaseOffsetRad = 0.0f;
+    m_orbitPhaseOriginMS = 0;
     m_targetDistance = 0;
     m_followDistance = 0;
     m_maxOrbitSpeedFraction = 1.0f;
@@ -1653,6 +1750,19 @@ void DestinyManager::InitWarp() {
             mySE->GetName(),
             mySE->GetID()
         );
+    }
+
+    if (not std::isfinite(m_targetDistance) or m_targetDistance <= 0.0) {
+        _log(
+            DESTINY__ERROR,
+            "Destiny::InitWarp() - %s(%u): invalid m_targetDistance %.4f; aborting warp.",
+            mySE->GetName(),
+            mySE->GetID(),
+            m_targetDistance
+        );
+        SafeDelete(m_warpState);
+        m_ballMode = Destiny::Ball::Mode::STOP;
+        return;
     }
 
     double warpSpeedInMeters(static_cast<double>(m_shipWarpSpeed) * static_cast<double>(ONE_AU_IN_METERS));
@@ -1976,6 +2086,8 @@ void DestinyManager::EntityRemoved(SystemEntity *pSE) {
     if (m_targetEntity.second == pSE) {
         m_targetEntity.first = 0;
         m_targetEntity.second = nullptr;
+        // Always drop orbit phase flags; Stop() only runs for some modes and Halt() does not clear m_orbiting.
+        ClearOrbit();
 
         switch(m_ballMode) {
             case Destiny::Ball::Mode::FOLLOW:
@@ -1990,11 +2102,14 @@ void DestinyManager::EntityRemoved(SystemEntity *pSE) {
 bool DestinyManager::IsTargetInvalid()
 {
     /** @todo  this needs a good lookover */
-    if (mySE->SystemMgr()->GetSE(m_targetEntity.first) == nullptr) {
+    SystemEntity* seTarg = mySE->SystemMgr()->GetSE(m_targetEntity.first);
+    if (seTarg == nullptr) {
         // Our target was removed
         Stop();
         return true;
     }
+    if (m_targetEntity.second == nullptr || m_targetEntity.second != seTarg)
+        m_targetEntity.second = seTarg;
     if (!m_targetEntity.second->IsDynamicEntity())
         return false;
     if (m_targetEntity.second->HasPilot()) {
@@ -2004,7 +2119,8 @@ bool DestinyManager::IsTargetInvalid()
             return true;
         }
     }
-    if (m_targetEntity.second->DestinyMgr()->IsWarping()) { // The target is warping
+    DestinyManager* targDest = m_targetEntity.second->DestinyMgr();
+    if (targDest != nullptr && targDest->IsWarping()) { // The target is warping
         //mySE->TargetMgr()->ClearTarget(m_targetEntity.second);
         Stop();
         return true;
@@ -2038,8 +2154,11 @@ void DestinyManager::BeginMovement() {
     m_turnTic = 0;
     m_stop = m_accel = m_decel = m_turning = false;
 
-    if (!mySE->IsNPCSE() or (mySE->IsNPCSE() and mySE->GetNPCSE()->GetAIMgr()->IsIdle()))
-        m_stateStamp = sEntityList.GetStamp();
+    // Always reset the movement epoch. Skipping this for active NPCs left m_stateStamp at 0 so
+    // Orbit() computed theta from (GetStamp() - 0): phase advanced by ~server uptime seconds,
+    // snapping the ship to the wrong ring position each tic and fighting client CmdOrbit (rubber-banding).
+    m_stateStamp = sEntityList.GetStamp();
+    m_lastNpcGotoFollowBroadcastMS = 0;
 
     // do any of these next 3 need to be on every movement check??
     if (m_position.isNaN()) {
@@ -2074,6 +2193,7 @@ void DestinyManager::BeginMovement() {
         GVector shipVector(m_position, m_targetPoint);
         m_targetDistance = static_cast<double>(shipVector.length());
         m_orbitRadTic = 0.0f;
+        m_orbitPhaseOffsetRad = 0.0f;
         m_maxOrbitSpeedFraction = 1;
     }
 
@@ -2096,6 +2216,11 @@ void DestinyManager::BeginMovement() {
 void DestinyManager::Follow(SystemEntity* pSE, uint32 distance) {
     //called from client as 'CmdFollowBall'
     //  also used by 'Approach'
+    if (pSE == nullptr) {
+        _log(DESTINY__WARNING, "Destiny::Follow() - %s(%u): null target.", mySE->GetName(), mySE->GetID());
+        Stop();
+        return;
+    }
     if ((m_ballMode == Destiny::Ball::Mode::FOLLOW)
     and (m_targetEntity.second == pSE)
     and (m_followDistance == distance)
@@ -2107,7 +2232,7 @@ void DestinyManager::Follow(SystemEntity* pSE, uint32 distance) {
         ClearOrbit();
 
     m_ballMode = Destiny::Ball::Mode::FOLLOW;
-    m_targetPoint = pSE->GetPosition();
+    m_targetPoint = pSE->GetAuthPosition();
 
     if (pSE->IsStationSE()) {
         // this makes ship approach station dock elevation (y), instead of approaching to stations "center point" position (where icon is)
@@ -2193,6 +2318,33 @@ void DestinyManager::WarpTo(const GPoint& where, int32 distance/*0*/, bool autoP
         return;
     }
 
+    m_stopDistance = distance;
+    GVector preLeg(m_position, where);
+    const double warpLen = preLeg.length();
+    const double targetDist = warpLen - static_cast<double>(m_stopDistance);
+    if (mySE->IsNPCSE() or mySE->IsDroneSE()) {
+        // Short leg or stop distance >= leg: m_targetDistance <= 0 → InitWarp uses log(negative) → NaN in WarpUpdate.
+        if (warpLen < 1.0 or targetDist <= 1.0) {
+            SetPosition(where, true);
+            m_ballMode = Destiny::Ball::Mode::STOP;
+            SafeDelete(m_warpState);
+            return;
+        }
+        /* Same-grid / spawn "warp-ins" are only a few hundred km–~1 Mm. Full Ball::Mode::WARP keeps
+         * IsWarping() true (target locks denied) through align+tunnel for a long time; use subwarp. */
+        static const double NPC_SUBLIGHT_WARP_MAX_M = 2e6;
+        if (warpLen < NPC_SUBLIGHT_WARP_MAX_M) {
+            preLeg.normalize();
+            GPoint landing(where);
+            landing.x -= preLeg.x * static_cast<double>(m_stopDistance);
+            landing.y -= preLeg.y * static_cast<double>(m_stopDistance);
+            landing.z -= preLeg.z * static_cast<double>(m_stopDistance);
+            GotoPoint(landing);
+            SafeDelete(m_warpState);
+            return;
+        }
+    }
+
     // check for autopilot.  it has 'special' checks in client for auto-disable by destiny update
     if (autoPilot) {
         Follow(pSE, distance);
@@ -2203,7 +2355,6 @@ void DestinyManager::WarpTo(const GPoint& where, int32 distance/*0*/, bool autoP
     m_targetEntity.first = 0;
     m_targetEntity.second = nullptr;
 
-    m_stopDistance = distance;
     // get warp target point
     GVector warp_distance(m_position, where);
     m_targetDistance = warp_distance.length();
@@ -2387,6 +2538,12 @@ void DestinyManager::WarpTo(const GPoint& where, int32 distance/*0*/, bool autoP
 }
 
 void DestinyManager::Orbit(SystemEntity *pSE, uint32 distance/*0*/) {
+    if (pSE == nullptr) {
+        _log(DESTINY__WARNING, "Destiny::Orbit() - %s(%u): null target; clearing orbit.", mySE->GetName(), mySE->GetID());
+        ClearOrbit();
+        return;
+    }
+
     if ((m_ballMode == Destiny::Ball::Mode::ORBIT)
     and (m_targetEntity.second == pSE)
     and (m_targetDistance == static_cast<double>(distance)))
@@ -2411,7 +2568,15 @@ void DestinyManager::Orbit(SystemEntity *pSE, uint32 distance/*0*/) {
     m_orbiting = Destiny::Ball::Orbit::Orbiting;
     m_targetEntity.first = pSE->GetID();
     m_targetEntity.second = pSE;
-    m_targetPoint = pSE->GetPosition();
+    m_targetPoint = pSE->GetAuthPosition();
+    if (m_targetPoint.isZero() or m_targetPoint.isNaN() or m_targetPoint.isInf())
+        m_targetPoint = pSE->GetPosition();
+    if (m_targetPoint.isZero() or m_targetPoint.isNaN() or m_targetPoint.isInf()) {
+        _log(DESTINY__WARNING, "Destiny::Orbit() - %s(%u): target %s(%u) has no valid position; clearing orbit.",
+            mySE->GetName(), mySE->GetID(), pSE->GetName(), pSE->GetID());
+        ClearOrbit();
+        return;
+    }
     m_targetDistance = static_cast<double>(distance);
     BeginMovement();
 
@@ -2430,72 +2595,49 @@ void DestinyManager::Orbit(SystemEntity *pSE, uint32 distance/*0*/) {
         _log(DESTINY__ORBIT_TRACE, "%s(%u) - Target Data - mass:%.3f, speed:%.2f, radius:%.2f", \
             mySE->GetName(), mySE->GetID(), Tm, (pSE->DestinyMgr() ? pSE->DestinyMgr()->GetSpeed() : 0 ), Tr);
 
-    // fudge distance to work 'close enough' with all targets...this was trial-n-error
-    double Rc = ((distance + 150 + m_radius - (pSE->GetRadius() /12)) * 1.2);
-    double Rc2 =  std::pow(Rc,2);
-    double Vm2 =  std::pow(m_maxShipSpeed,2);
-    double t2 =  std::pow(m_shipAgility,2);
+    OrbitKinematics::Params ok;
+    ok.cmd_m = static_cast<double>(distance);
+    ok.self_radius_m = m_radius;
+    ok.target_radius_m = Tr;
+    ok.max_ship_speed_mps = m_maxShipSpeed;
+    ok.ship_agility = m_shipAgility;
 
-    // the following equation is from "Ship Motion in Eve Online" by Scheulagh Santorine, Ph.D
-    // radius needs target mass and grav const factored in....somehow.
-    // orbit radius
-    /* r = sqrt(6 * cbrt(108t^2*Vm^2 * Rc^2 + 8Rc^6 + 12sqrt(81t^4 *Vm^4 + 12t^2 * Vm^2 * Rc^10))
-     * + (24Rc^4 / (108t^2 * Vm^2 * Rc^2 + 8Rc^2 + 12sqrt(81t^4 * Vm^4 * Rc^8 + 12t^2 * Vm^2 * Rc^10)^1/3)) + 12Rc^2) /6
-     */
-    double one = (108 * t2 * Vm2 * Rc2);
-    double two = (12 * t2 * Vm2 *  std::pow(Rc,10));
-    double three = (12 * std::sqrt(81 *  std::pow(m_shipAgility,4) *  std::pow(m_maxShipSpeed,4) + two));
-    double four = (6 *  std::cbrt(one + 8 *  std::pow(Rc,6) + three));
-    double five =  std::cbrt( std::sqrt(three *  std::pow(Rc,8) + two));
-    double six = (one + (8 * Rc2) + (12 * five));
-    m_followDistance =  std::sqrt(four + (24 *  std::pow(Rc, 4) / six) + 12 * Rc2) / 6;
+    const OrbitKinematics::Result kin = OrbitKinematics::ComputeLegacyCompatible(ok);
+    {
+        constexpr double fdMax = 2147483000.0;
+        double rEnc = kin.r_follow_m;
+        if (!std::isfinite(rEnc) || rEnc < 50.0)
+            rEnc = distance + Tr + m_radius;
+        rEnc = std::max(50.0, std::min(rEnc, fdMax));
+        m_followDistance = static_cast<uint32>(rEnc);
+    }
 
-    double velocity = m_maxShipSpeed * ((distance / m_followDistance) + 0.065); // dunno where i got this from but seems to work very well.
-    m_maxOrbitSpeedFraction = velocity / m_maxShipSpeed;
+    double velocity = kin.tangential_speed_mps;
+    if (!std::isfinite(velocity) || velocity < 0.0)
+        velocity = m_maxShipSpeed * ((static_cast<double>(distance) / std::max(1u, m_followDistance)) + 0.065);
+    m_maxOrbitSpeedFraction = static_cast<float>(velocity / std::max(1e-6, (double)m_maxShipSpeed));
 
-    double circ = EvE::Trig::Pi2 * m_followDistance;
-    m_orbitTime = circ / velocity;
-    m_orbitRadTic = EvE::Trig::Pi2 / m_orbitTime;
+    m_orbitTime = kin.orbit_period_s;
+    m_orbitRadTic = static_cast<float>(kin.omega_rad_s);
+    m_orbitPhaseOriginMS = static_cast<uint32>(GetTimeMSeconds());
+    m_orbitPhaseOffsetRad = static_cast<float>(EvE::Trig::Pi2 * static_cast<double>(mySE->GetID() % 997u) / 997.0);
+    m_orbitPhase = DestinyOrbitPhase::Approach;
+    m_orbitHasPrevTargetPos = false;
 
     if (is_log_enabled(DESTINY__ORBIT_TRACE))
-        _log(DESTINY__ORBIT_TRACE, "%s(%u) - Orbit Data - Rc:%.3f, velocity:%.2f, osf:%.2f, targetDistance:%.2f, followDistance:%u, orbitTime:%.1f, radTic:%.5f", \
-                mySE->GetName(), mySE->GetID(), Rc, velocity, m_maxOrbitSpeedFraction, \
-                m_targetDistance, m_followDistance, m_orbitTime, m_orbitRadTic);
-/*  dont really need this here yet.....maybe not at all.
-    double current = m_position.distance(pSE->GetPosition());
-    double actual = (current - m_radius - Tr);
-    // m_orbiting: -2=way too close  -1=too close, 0=no orbit, 1=at distance 2=too far, 3=way too far
-    if ((actual - m_followDistance) > m_followDistance) {
-        // too far to engage target.
-        m_orbiting = 3;
-    } else if (current > m_followDistance) {
-        // too far outside orbit.  move closer
-        m_orbiting = 2;
-    } else if (actual < m_followDistance) {
-        // way too close inside orbit.  move away quickly.
-        m_orbiting = -2;
-    } else if (current < m_followDistance) {
-        // too close inside orbit; move away slowly.
-        m_orbiting = -1;
-    } else {
-        // within orbit distance tolerance
-        m_orbiting = 1;
-    }
+        _log(DESTINY__ORBIT_TRACE, "%s(%u) - Orbit Data - r_follow:%u v:%.2f ω:%.8f Osf:%.3f tgtDist:%.2f orbT:%.1f",
+            mySE->GetName(), mySE->GetID(), m_followDistance, velocity, kin.omega_rad_s, m_maxOrbitSpeedFraction,
+            m_targetDistance, m_orbitTime);
 
-    if (m_orbiting > 1) {
-        // outside target distance.  set orbit parameters based on current position.
-
-    }
-*/
     if (m_followDistance == 0) {
         _log(DESTINY__ERROR, "%s(%u) - FollowDistance is 0.", mySE->GetName(), mySE->GetID());
-        m_followDistance = (uint32)(m_targetDistance + Tr + m_radius); // fudge something here.  will have to fix later, but this is close enough
+        m_followDistance = static_cast<uint32>(m_targetDistance + Tr + m_radius); // fudge something here.  will have to fix later, but this is close enough
     }
 
     CmdOrbit du;
         du.entityID = mySE->GetID();
         du.orbitEntityID = pSE->GetID();
-        du.distance = (int32)m_targetDistance;
+        du.distance = (m_followDistance > 0 ? static_cast<int32>(m_followDistance) : static_cast<int32>(m_targetDistance));
     PyTuple *up = du.Encode();
     SendSingleDestinyUpdate(&up);   // consumed
 }
@@ -2618,20 +2760,32 @@ void DestinyManager::DockingAccepted()
 }
 
 void DestinyManager::SetPosition(const GPoint &pt, bool update /*false*/) {
-    _log(DESTINY__TRACE, "Destiny::SetPosition() called by %s(%u)", mySE->GetName(), mySE->GetID());
+    if (is_log_enabled(DESTINY__TRACE))
+        _log(DESTINY__TRACE, "Destiny::SetPosition() called by %s(%u)", mySE->GetName(), mySE->GetID());
 
-    // Never teleport to a random map point on bad input. That masks the root cause
-    // and can throw ships far off-grid. Keep last known-good position instead.
-    if (pt.isZero() or pt.isNaN() or pt.isInf()) {
-        _log(DESTINY__ERROR, "Destiny::SetPosition() - rejecting invalid point for %s(%u): zero=%s nan=%s inf=%s. Keeping current position %.2f,%.2f,%.2f",
-            mySE->GetName(), mySE->GetID(),
-            (pt.isZero() ? "true" : "false"),
-            (pt.isNaN() ? "true" : "false"),
-            (pt.isInf() ? "true" : "false"),
-            m_position.x, m_position.y, m_position.z);
-        return;
+    // Never teleport to a random map point on bad input. Drones can still receive (0,0,0)
+    // from broken orbit math when the controller position was stale; recover from inventory.
+    GPoint usePt(pt);
+    if (usePt.isZero() or usePt.isNaN() or usePt.isInf()) {
+        if (mySE->IsDroneSE()) {
+            const GPoint ip(mySE->GetPosition());
+            if (ip.isNotZero() and !ip.isNaN() and !ip.isInf()) {
+                usePt = ip;
+                _log(DESTINY__MESSAGE, "Destiny::SetPosition() - drone %s(%u): invalid snap; using item position %.2f,%.2f,%.2f",
+                    mySE->GetName(), mySE->GetID(), usePt.x, usePt.y, usePt.z);
+            }
+        }
+        if (usePt.isZero() or usePt.isNaN() or usePt.isInf()) {
+            _log(DESTINY__ERROR, "Destiny::SetPosition() - rejecting invalid point for %s(%u): zero=%s nan=%s inf=%s. Keeping current position %.2f,%.2f,%.2f",
+                mySE->GetName(), mySE->GetID(),
+                (pt.isZero() ? "true" : "false"),
+                (pt.isNaN() ? "true" : "false"),
+                (pt.isInf() ? "true" : "false"),
+                m_position.x, m_position.y, m_position.z);
+            return;
+        }
     }
-    m_position = pt;
+    m_position = usePt;
 
     // this sets InventoryItemRef.m_position correctly, which is used for all position references
     mySE->SetPosition(m_position);
@@ -2666,7 +2820,9 @@ void DestinyManager::SetPosition(const GPoint &pt, bool update /*false*/) {
             const double vlen2 = m_velocity.x * m_velocity.x
                                + m_velocity.y * m_velocity.y
                                + m_velocity.z * m_velocity.z;
-            if (vlen2 > 1.0) {
+            // Match non-pilot threshold: sub-1 m/s flight still needs vel+heading so observers do not
+            // extrapolate from position-only snaps (same desync class as NPC orbit creep).
+            if (vlen2 > 1e-6) {
                 SetBallVelocity vel;
                     vel.entityID = mySE->GetID();
                     vel.x = m_velocity.x;
@@ -2699,7 +2855,7 @@ void DestinyManager::SetPosition(const GPoint &pt, bool update /*false*/) {
             // can diverge enough that two clients disagree on absolute ship positions.
             // Send a low-rate self-only correction snapshot to re-anchor the pilot.
             const uint32 nowMS = static_cast<uint32>(GetTimeMSeconds());
-            if ((nowMS - m_lastSelfSyncMS) >= 400) {
+            if ((nowMS - m_lastSelfSyncMS) >= 200) {
                 m_lastSelfSyncMS = nowMS;
 
                 SetBallPosition selfPos;
@@ -2713,7 +2869,14 @@ void DestinyManager::SetPosition(const GPoint &pt, bool update /*false*/) {
         } else {
             // Non-piloted movers (NPCs/drones/missiles) also benefit from velocity/heading
             // packets so clients interpolate motion instead of stepping position snaps.
+            //
+            // Ring orbit is kinematically curved ( ω≠0 ). Throttling SetBallPosition (~150ms)
+            // while still broadcasting velocity each tick made observers extrapolate straight tangents
+            // until the next snap → periodic jumps toward true orbit arc — visually teleport/jitter.
+            // Align snaps with high-frequency destiny (~50ms); CmdOrbit still primes observer locals.
+
             std::vector<PyTuple*> updates;
+
             SetBallPosition pos;
                 pos.entityID = mySE->GetID();
                 pos.x = m_position.x;
@@ -2721,10 +2884,12 @@ void DestinyManager::SetPosition(const GPoint &pt, bool update /*false*/) {
                 pos.z = m_position.z;
             updates.push_back(pos.Encode());
 
+            // NPCs/drones often move at <1 m/s (orbit settle, follow creep). Skipping velocity below
+            // 1 m/s left clients with position-only snaps and overview speed 0 while the model still moved.
             const double vlen2 = m_velocity.x * m_velocity.x
                                + m_velocity.y * m_velocity.y
                                + m_velocity.z * m_velocity.z;
-            if (vlen2 > 1.0) {
+            if (vlen2 > 1e-6) {
                 SetBallVelocity vel;
                     vel.entityID = mySE->GetID();
                     vel.x = m_velocity.x;
@@ -2745,13 +2910,15 @@ void DestinyManager::SetPosition(const GPoint &pt, bool update /*false*/) {
                 }
             }
 
-            SendDestinyUpdate(updates);
+            if (!updates.empty())
+                SendDestinyUpdate(updates);
         }
     }
 }
 
 void DestinyManager::SetRadius(double radius, bool update /*false*/) {
-    _log(DESTINY__TRACE, "Destiny::SetPosition() called by %s(%u)", mySE->GetName(), mySE->GetID());
+    if (is_log_enabled(DESTINY__TRACE))
+        _log(DESTINY__TRACE, "Destiny::SetRadius() called by %s(%u)", mySE->GetName(), mySE->GetID());
 
     m_radius = radius;
 
@@ -2975,7 +3142,7 @@ void DestinyManager::MakeMissile(Missile* pMissile) {
     m_stateStamp = sEntityList.GetStamp();
 
     SystemEntity* pTarget = pMissile->GetTargetSE();
-    m_targetPoint = GPoint(pTarget->GetPosition());
+    m_targetPoint = GPoint(pTarget->GetAuthPosition());
     m_targetEntity.first = pTarget->GetID();
     m_targetEntity.second = pTarget;
     m_targetDistance = static_cast<double>(m_position.distance(m_targetPoint));
@@ -3206,7 +3373,8 @@ void DestinyManager::CheckCloakProximity() {
     // We scan the bubble (small, spatially local) instead of the whole system.
     static const double kDecloakRange = 2000.0;
 
-    std::map<uint32, SystemEntity*> entities;
+    thread_local std::map<uint32, SystemEntity*> entities;
+    entities.clear();
     pBubble->GetAllEntities(entities);
 
     for (auto& kv : entities) {
@@ -3222,7 +3390,7 @@ void DestinyManager::CheckCloakProximity() {
         if (pSE->IsInvul() || pSE->IsDead())
             continue;
 
-        const double dist = m_position.distance(pSE->GetPosition());
+        const double dist = m_position.distance(pSE->GetAuthPosition());
         const double trigger = kDecloakRange + m_radius + pSE->GetRadius();
         if (dist < trigger) {
             _log(DESTINY__MOVE_TRACE,
@@ -3253,7 +3421,7 @@ void DestinyManager::TractorBeamStart(SystemEntity* pShipSE, EvilNumber speed)
     m_moveTime = GetTimeMSeconds();
     m_stateStamp = sEntityList.GetStamp();
 
-    m_targetPoint = pShipSE->GetPosition();
+    m_targetPoint = pShipSE->GetAuthPosition();
     GVector moveVector(m_position, m_targetPoint);
     m_targetDistance = static_cast<double>(moveVector.length());
     moveVector.normalize();
@@ -3704,6 +3872,13 @@ void DestinyManager::SendSetState() const {
     mySE->GetPilot()->QueueDestinyUpdate(&tmp, true, true); // consumed
 
     mySE->GetPilot()->SetStateSent(true);
+
+    /* Push recharge attrs again now that Destiny queues flush — fixes client godma tau after login SetState. */
+    if (mySE->IsShipSE()) {
+        ShipItemRef hull(static_cast<ShipSE*>(mySE)->GetShipItemRef());
+        if (hull.get() != nullptr)
+            hull->SanitizeSimulatorRechargeAttributes();
+    }
 }
 
 void DestinyManager::SendMovementPacket()

@@ -1,4 +1,6 @@
 
+#include <cmath>
+
 #include "Client.h"
 #include "EntityList.h"
 #include "EVEServerConfig.h"
@@ -8,6 +10,7 @@
 #include "character/Character.h"
 #include "effects/EffectsProcessor.h"
 #include "inventory/Inventory.h"
+#include "map/MapData.h"
 #include "npc/Drone.h"
 #include "ship/Ship.h"
 #include "ship/modules/GenericModule.h"
@@ -881,6 +884,122 @@ void ShipItem::UpdateModules(EVEItemFlags flag)
     // ShipSE::AddItem()
     // Client::MoveItem()               - something has been moved into or out of the ship, recheck all modules for... some reason
     m_ModuleManager->UpdateModules(flag);
+}
+
+void ShipItem::SanitizeSimulatorRechargeAttributes()
+{
+    // Client godma.GetChargeValue: tau derives from capacitor/shield recharge time (ms), e.g. tau = ms/5000.
+    // tau==0 blows the HUD (ZeroDivisionError); clamp dogma/item values into a sane band.
+    // Zero/non-positive ShieldRechargeRateMultiplier / CapRechargeMultiplier also drive effective tau to 0 in the client.
+    constexpr double kMinRechargeMs = 5000.0;
+    constexpr double kMaxRechargeMs = 864000000.0;
+
+    /* Type merge / DB may omit multiplier attrs; client dogma treats missing as 0 → tau collapses on GetChargeValue. */
+    auto ensureMult = [&](uint16 attr, const char *label) {
+        if (HasAttribute(attr))
+            return;
+        EvilNumber nv(1.0);
+        SetAttribute(attr, nv, true);
+        _log(SHIP__MESSAGE,
+            "SanitizeSimulatorRechargeAttributes: %s(%u): missing %s — default 1.0 sent to client.",
+            name(), itemID(), label);
+    };
+    ensureMult(AttrShieldRechargeRateMultiplier, "AttrShieldRechargeRateMultiplier");
+    ensureMult(AttrCapacitorRechargeRateMultiplier, "AttrCapacitorRechargeRateMultiplier");
+    ensureMult(AttrRechargeRateMultiplier, "AttrRechargeRateMultiplier");
+
+    auto fixMult = [&](uint16 attr, const char *label) {
+        if (!HasAttribute(attr))
+            return;
+        const double m(GetAttribute(attr).get_double());
+        if (!(std::isnan(m) || std::isinf(m) || m <= 0.0))
+            return;
+
+        EvilNumber nv(1.0);
+        SetAttribute(attr, nv, true);
+        _log(SHIP__WARNING,
+            "SanitizeSimulatorRechargeAttributes: %s(%u): %s was %.12g → 1 (bad multiplier freezes godma tau).",
+            name(), itemID(), label, m);
+    };
+    fixMult(AttrShieldRechargeRateMultiplier, "AttrShieldRechargeRateMultiplier");
+    fixMult(AttrCapacitorRechargeRateMultiplier, "AttrCapacitorRechargeRateMultiplier");
+    fixMult(AttrRechargeRateMultiplier, "AttrRechargeRateMultiplier");
+
+    auto fix = [&](uint16 attr, const char *label,
+                   uint16 poolAttrForCorruptionProbe, bool hullHighHpPool) {
+        const double rr(GetAttribute(attr).get_double());
+        double repaired(rr);
+
+        /* entity_attributes corruption: recharge time (~ms full cycle) overwritten with HP/GJ pools.
+         * Symptoms: shield row shows ~same number as ShieldCapacity, fitting shows "0 s", godma tau=0. */
+        bool capacityLike(false);
+        if (HasAttribute(poolAttrForCorruptionProbe)) {
+            const double pool(GetAttribute(poolAttrForCorruptionProbe).get_double());
+            if (pool > 200.0 && rr > 0.0 && std::fabs(rr - pool) <= std::max(50.0, pool * 0.06))
+                capacityLike = true;
+        }
+        double typeDef(GetDefaultAttribute(attr).get_double());
+        if (HasAttribute(poolAttrForCorruptionProbe)) {
+            const double pool(GetAttribute(poolAttrForCorruptionProbe).get_double());
+            if (pool > 100.0 && std::fabs(typeDef - pool) <= std::max(50.0, pool * 0.06))
+                typeDef = hullHighHpPool ? 2500000.0 : 750000.0;
+        }
+        if (std::isnan(typeDef) || std::isinf(typeDef) || typeDef < 1000.0)
+            typeDef = hullHighHpPool ? 2500000.0 : 750000.0;
+
+        bool tooSmallMs(false);
+        if (hullHighHpPool && HasAttribute(poolAttrForCorruptionProbe)) {
+            const double pool(GetAttribute(poolAttrForCorruptionProbe).get_double());
+            if (pool >= 4000.0 && rr > 0.0 && rr < 400000.0)
+                tooSmallMs = true;
+        }
+
+        if (capacityLike || tooSmallMs) {
+            repaired = typeDef;
+            _log(SHIP__WARNING,
+                "SanitizeSimulatorRechargeAttributes: %s(%u): %s looked corrupted vs pool (%.12g) — reset to type default %.12g ms.",
+                name(), itemID(), label, rr, repaired);
+        } else if (std::isnan(rr) || std::isinf(rr))
+            repaired = 500000.0;
+        else if (rr <= 0.0)
+            repaired = 500000.0;
+        else if (rr < 1.0)
+            repaired = 25000.0;
+        else {
+            repaired = rr;
+            if (repaired < kMinRechargeMs)
+                repaired = kMinRechargeMs;
+            else if (repaired > kMaxRechargeMs)
+                repaired = kMaxRechargeMs;
+        }
+
+        if (!(std::isnan(rr) || std::isinf(rr) || rr <= 0.0 || rr < 1.0)
+            && std::fabs(repaired - rr) < 1e-6)
+            return;
+
+        EvilNumber nv(repaired);
+        SetAttribute(attr, nv, true);
+        if (!(capacityLike || tooSmallMs))
+            _log(SHIP__WARNING, "SanitizeSimulatorRechargeAttributes: %s(%u): %s was unsafe (%.12g → %.12g) for simulator.",
+                name(), itemID(), label, rr, repaired);
+    };
+    fix(AttrRechargeRate, "AttrRechargeRate",
+        AttrCapacitorCapacity,
+        HasAttribute(AttrCapacitorCapacity) && GetAttribute(AttrCapacitorCapacity).get_double() >= 4500.0);
+    fix(AttrShieldRechargeRate, "AttrShieldRechargeRate",
+        AttrShieldCapacity,
+        HasAttribute(AttrShieldCapacity) && GetAttribute(AttrShieldCapacity).get_double() >= 6000.0);
+
+    /* Last resort: Crucible godma.py GetChargeValue divides by recharge-derived tau — any sub-minimum ms ⇒ tau=ZeroDivisionError */
+    auto floorRechargeMs = [&](uint16 attr) {
+        if (!HasAttribute(attr))
+            return;
+        const double v(GetAttribute(attr).get_double());
+        if (std::isnan(v) || std::isinf(v) || v < kMinRechargeMs - 1e-6)
+            SetAttribute(attr, EvilNumber(kMinRechargeMs), true);
+    };
+    floorRechargeMs(AttrRechargeRate);
+    floorRechargeMs(AttrShieldRechargeRate);
 }
 
 //  Updated fractional ship defense settings.  -allan 1Feb15
@@ -2438,26 +2557,24 @@ m_allowFleetSMBUsage(false)
 
 float ShipSE::CalculateRechargeRate(float Capacity, float Current, float RechargeTimeMS)
 {
-    // C = Cmax * [ 1 + ( SQRT(C0/Cmax) - 1) * EXP((t0-t1)/tau) ] ^ 2
-    // dC/dt = (SQRT(C/Cmax) - C/Cmax) * 2 * Cmax / tau
-    // tau = "Cap Recharge Time" / 5.0
+    /* EVE passive shield (and capacitor) share one smooth recovery curve: let p = C/Cmax ∈ [0,1].
+     *   dC/dt = (2·Cmax/τ)·(√p − p),   τ = RechargeTimeMS/5000  (derived from Tranquility cap/shield recharge dogma.)
+     *
+     * The factor g(p)=√p−p is zero at p∈{0,1}; it reaches a single maximum at p=¼. So instantaneous
+     * regen peaks at ~25 % pool — matches in-game shield/cap behaviour (fitting window peak is usually
+     * quoted versus a lower time-averaged rate over an empty→full recharge, conventionally ~×2 peak/mean.)
+     */
 
-    // prevent divide by zero.
+    /* prevent divide by zero / denorm clamps */
     RechargeTimeMS = (RechargeTimeMS < 1 ? 1 : RechargeTimeMS);
     Current = (Current < 1 ? 1 : Current);
     float Cmax = (Capacity < 1 ? 1 : Capacity);
 
-    // tau = "cap recharge time" / 5.0
-    float tau = (RechargeTimeMS / 5000.0);
-    // (2*Cmax) / tau
-    float Cmax2_tau = ((Cmax * 2) / tau);
-    float C = Current;
-    // C / Cmax
-    float C_Cmax = (C / Cmax);
-    // sqrt( C / Cmax)
-    float sC_Cmax = sqrt(C_Cmax);
-    // charge rate in Gj / sec
-    return (Cmax2_tau * (sC_Cmax - C_Cmax));
+    const float tau = (RechargeTimeMS / 5000.0f);
+    const float Cmax2_tau = ((Cmax * 2.f) / tau);
+    const float p = Current / Cmax;
+    const float sqrt_p = sqrtf(p);
+    return (Cmax2_tau * (sqrt_p - p));
 }
 
 void ShipSE::Process() {
@@ -2472,41 +2589,65 @@ void ShipSE::Process() {
     if ((m_self.get() == nullptr) or (!m_self->HasPilot()))
         return;
 
-    if (m_processTimer.Check()) {
-        double profileStartTime(GetTimeUSeconds());
-        // shield
-        float Charge = m_self->GetAttribute(AttrShieldCharge).get_float();
-        float Capacity = m_self->GetAttribute(AttrShieldCapacity).get_float();
-        if (Charge < Capacity) {
-            float newCharge = Charge + ((m_processTimerTick /1000) * CalculateRechargeRate(Capacity, Charge, m_self->GetAttribute(AttrShieldRechargeRate).get_float()));
-            if (newCharge > Capacity) {
-                newCharge = Capacity;
-            } else if ((Capacity - newCharge) < 0.3) {
-                newCharge = Capacity;
-            }
+    if (m_shipRef.get() != nullptr)
+        m_shipRef->SanitizeSimulatorRechargeAttributes();
+
+    /* Shield & cap recharge: ShipSE runs on SystemManager ProcessTic (EntityList stamp ~1 Hz).
+     * Older code gated regen behind m_processTimer (5 s) — with 1 Hz Process() that delayed regen bursts
+     * ~5× real seconds and starved HUD/godma updates. Integrate ~1 s of dC/dt each tick instead. */
+    constexpr float kRechargeDtSec = 1.0f;
+
+    double profileStartTime(0);
+    if (sConfig.debug.UseProfiling)
+        profileStartTime = GetTimeUSeconds();
+
+    bool dmgStateDirty(false);
+
+    float Charge = m_self->GetAttribute(AttrShieldCharge).get_float();
+    float Capacity = m_self->GetAttribute(AttrShieldCapacity).get_float();
+    if (Charge < Capacity) {
+        float newCharge = Charge + (kRechargeDtSec * CalculateRechargeRate(Capacity, Charge,
+            m_self->GetAttribute(AttrShieldRechargeRate).get_float()));
+        if (newCharge > Capacity) {
+            newCharge = Capacity;
+        } else if ((Capacity - newCharge) < 0.3f) {
+            newCharge = Capacity;
+        }
+        /* Skip SetAttribute churn when unchanged (floating noise / already full). */
+        if (std::fabs(newCharge - Charge) > 1e-5f) {
             m_self->SetAttribute(AttrShieldCharge, newCharge);
-            SendDamageStateChanged();
-            _log(SHIP__RECHARGE, "ShipSE::Process(): %s(%u) - New Shield Charge: %f", m_self->GetPilot()->GetName(), m_self->itemID(), newCharge);
+            dmgStateDirty = true;
+            _log(SHIP__RECHARGE, "ShipSE::Process(): %s(%u) - New Shield Charge: %f",
+                m_self->GetPilot()->GetName(), m_self->itemID(), newCharge);
         }
+    }
 
-        // cap
-        Charge = m_self->GetAttribute(AttrCapacitorCharge).get_float();
-        Capacity = m_self->GetAttribute(AttrCapacitorCapacity).get_float();
-        if (Charge < Capacity) {
-            float newCharge = Charge + ((m_processTimerTick /1000) * CalculateRechargeRate(Capacity, Charge, m_self->GetAttribute(AttrRechargeRate).get_float()));
-            if (newCharge > Capacity) {
-                newCharge = Capacity;
-            } else if ((Capacity - newCharge) < 0.3) {
-                newCharge = Capacity;
-            }
+    Charge = m_self->GetAttribute(AttrCapacitorCharge).get_float();
+    Capacity = m_self->GetAttribute(AttrCapacitorCapacity).get_float();
+    if (Charge < Capacity) {
+        float newCharge = Charge + (kRechargeDtSec * CalculateRechargeRate(Capacity, Charge,
+            m_self->GetAttribute(AttrRechargeRate).get_float()));
+        if (newCharge > Capacity) {
+            newCharge = Capacity;
+        } else if ((Capacity - newCharge) < 0.3f) {
+            newCharge = Capacity;
+        }
+        if (std::fabs(newCharge - Charge) > 1e-5f) {
             m_self->SetAttribute(AttrCapacitorCharge, newCharge);
-            _log(SHIP__RECHARGE, "ShipSE::Process(): %s(%u) - New Cap Charge: %f", m_self->GetPilot()->GetName(), m_self->itemID(), newCharge);
+            dmgStateDirty = true;
+            _log(SHIP__RECHARGE, "ShipSE::Process(): %s(%u) - New Cap Charge: %f",
+                m_self->GetPilot()->GetName(), m_self->itemID(), newCharge);
         }
-        // profile timer for the ship recharge shit
-        if (sConfig.debug.UseProfiling)
-            sProfiler.AddTime(Profile::ship, GetTimeUSeconds() - profileStartTime);
+    }
 
-        // proc heat on the 5s cap/shield tic, if enabled
+    if (dmgStateDirty)
+        SendDamageStateChanged();
+
+    if (sConfig.debug.UseProfiling)
+        sProfiler.AddTime(Profile::ship, GetTimeUSeconds() - profileStartTime);
+
+    /* Heat still on the 5 s timer — independent of recharge tick rate. */
+    if (m_processTimer.Check()) {
         if (sConfig.testing.ShipHeat)
             m_shipRef->ProcessHeat();
     }
@@ -2610,19 +2751,23 @@ void ShipSE::RemoveTarget(SystemEntity* pSE) {
 void ShipSE::EncodeDestiny( Buffer& into) {
     using namespace Destiny;
 
-    uint8 mode = m_destiny->GetState(); //Ball::Mode::STOP;
+    uint8 mode = m_destiny->GetState();
+    if (mode != Ball::Mode::WARP && mode != Ball::Mode::FOLLOW && mode != Ball::Mode::ORBIT
+            && mode != Ball::Mode::GOTO && mode != Ball::Mode::STOP)
+        mode = Ball::Mode::STOP;
 /*
     NameStruct name;
         name.name = GetName();
         name.name_len = sizeof(name.name);
   */
+    const GPoint bh(m_destiny != nullptr ? m_destiny->GetPosition() : GetPosition());
     BallHeader head = BallHeader();
         head.entityID = GetID();
         head.mode = mode;
         head.radius = GetRadius();
-        head.posX = x();
-        head.posY = y();
-        head.posZ = z();
+        head.posX = bh.x;
+        head.posY = bh.y;
+        head.posZ = bh.z;
         if (m_self->HasPilot()) {
             head.flags = Ball::Flag::IsInteractive | Ball::Flag::IsFree;
         } else {
@@ -2653,10 +2798,9 @@ void ShipSE::EncodeDestiny( Buffer& into) {
                 warp.targY = target.y;
                 warp.targZ = target.z;
                 warp.speed = m_destiny->GetWarpSpeed();       //ship warp speed x10  (dont ask...this is what it is...more dumb ccp shit)
-                // warp timing.  see ShipSE::EncodeDestiny() for notes/updates
-                warp.effectStamp = -1; //m_destiny->GetStateStamp();   //timestamp when warp started
-                warp.followRange = 0;   //this isnt right
-                warp.followID = 0;  //this isnt right
+                warp.effectStamp = static_cast<int32>(m_destiny->GetStateStamp());
+                warp.followRange = WARP_SNAPSHOT_FOLLOW_RANGE;
+                warp.followID = WARP_SNAPSHOT_FOLLOW_ID;
             into.Append(warp);
         }  break;
         case Ball::Mode::FOLLOW: {
@@ -2712,7 +2856,7 @@ void ShipSE::EncodeDestiny( Buffer& into) {
 void ShipSE::MakeDamageState(DoDestinyDamageState &into) {
     into.shield = (m_self->GetAttribute(AttrShieldCharge).get_float() / m_self->GetAttribute(AttrShieldCapacity).get_float());
     into.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_float() + 7;
-    into.timestamp = GetFileTimeNow();
+    into.timestamp = GetFileTimeNowInt64();
     into.armor = 1.0 - (m_self->GetAttribute(AttrArmorDamage).get_float() / m_self->GetAttribute(AttrArmorHP).get_float());
     into.structure = 1.0 - (m_self->GetAttribute(AttrDamage).get_float() / m_self->GetAttribute(AttrHP).get_float());
 }
@@ -2844,7 +2988,15 @@ bool ShipSE::LaunchDrone(InventoryItemRef dRef) {
     dRef->Move(GetLocationID(), flagNone, true);
     dRef->ChangeSingleton(true);
 
-    GPoint position(GetPosition());
+    // Use auth position so drones match the piloted hull's in-space coords (item can lag destiny).
+    GPoint position(GetAuthPosition());
+    if (position.isZero() or position.isNaN() or position.isInf())
+        position = GetPosition();
+    if (position.isZero() or position.isNaN() or position.isInf()) {
+        _log(PLAYER__ERROR, "ShipSE::LaunchDrone() - %s(%u): ship has no valid position; using random system point for drone spawn.",
+            pChar->name(), GetID());
+        position = sMapData.GetRandPointOnPlanet(m_system->GetID());
+    }
     position.MakeRandomPointOnSphere(500.0);
     dRef->SetPosition(position);
 
@@ -2881,6 +3033,16 @@ void ShipSE::ScoopDrone(SystemEntity* pSE) {
     pSE->GetDroneSE()->Offline();
     EvilNumber load = m_shipRef->GetAttribute(AttrDroneBandwidthLoad);
     load -= pSE->GetSelf()->GetAttribute(AttrDroneBandwidthUsed);
+    m_shipRef->SetAttribute(AttrDroneBandwidthLoad, load, false); // client dont care
+}
+
+void ShipSE::ReleaseLaunchedDrone(DroneSE* pDrone) {
+    if (pDrone == nullptr)
+        return;
+    m_drones.erase(pDrone->GetID());
+    m_drones.erase(pDrone->GetSelf()->itemID());
+    EvilNumber load = m_shipRef->GetAttribute(AttrDroneBandwidthLoad);
+    load -= pDrone->GetSelf()->GetAttribute(AttrDroneBandwidthUsed);
     m_shipRef->SetAttribute(AttrDroneBandwidthLoad, load, false); // client dont care
 }
 

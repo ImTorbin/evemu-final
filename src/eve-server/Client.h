@@ -306,6 +306,12 @@ public:
     void QueueDestinyUpdate(PyTuple** update, bool DoPackage=false, bool IsSetState=false);
     void QueueDestinyEvent(PyTuple** multiEvent);
     void FlushQueue();
+    /** True when _SendQueuedUpdates() drops queued destiny traffic (pre-SetState / no ShipSE / docked). */
+    bool                        DestinyQueuesCurrentlyDropped() const;
+    /** Send one OnMultiEvent entry immediately; used when QueueDestinyEvent would be discarded. */
+    void                        EmitDestinyEventImmediate(PyTuple* singleEncodedEvent);
+    /** Same envelope as queued DoDestinyAction but sent now — avoids m_destinyUpdateQueue clear while !SetState. */
+    void                        EmitDestinyUpdateNow(PyTuple** updateEncodedRaw);
 
     //  mission
     void RemoveMissionItem(uint16 typeID, uint32 qty);

@@ -170,7 +170,7 @@ bool TargetManager::StartTargeting(SystemEntity *tSE, ShipItemRef sRef)
 
     // Check against max target range
     double maxTargetRange = sRef->GetAttribute(AttrMaxTargetRange).get_double();
-    GVector rangeToTarget( mySE->GetPosition(), tSE->GetPosition() );
+    GVector rangeToTarget( mySE->GetAuthPosition(), tSE->GetAuthPosition() );
     // adjust for target radius, in case of ice or other large objects..
     double targetDistance = rangeToTarget.length();
     if (tSE->IsAsteroidSE())
@@ -222,7 +222,7 @@ bool TargetManager::StartTargeting(SystemEntity *tSE, float lockTime, uint8 maxL
         return false;
     }
     // Check against max target range
-    if (mySE->GetPosition().distance(tSE->GetPosition()) > maxTargetLockRange){
+    if (mySE->GetAuthPosition().distance(tSE->GetAuthPosition()) > maxTargetLockRange){
         _log(TARGET__TRACE, " %s(%u): Told to target %s(%u), but they are too far away.  Begin Approaching.", \
         mySE->GetName(), mySE->GetID(), tSE->GetName(), tSE->GetID());
         chase = true;
@@ -496,6 +496,32 @@ bool TargetManager::IsTargetedBy(SystemEntity* pSE)
     return (m_targetedBy.find(pSE) != m_targetedBy.end());
 }
 
+void TargetManager::ClearStaleWarpScramble(double maxTackleRangeM)
+{
+    if (!mySE->HasPilot())
+        return;
+    ShipSE* shipSE = mySE->GetShipSE();
+    if (shipSE == nullptr)
+        return;
+    ShipItemRef ship = shipSE->GetShipItemRef();
+    if (ship.get() == nullptr)
+        return;
+    if (ship->GetAttribute(AttrWarpScrambleStatus).get_float() <= 0.0f)
+        return;
+    if (m_targetedBy.empty()) {
+        ship->SetAttribute(AttrWarpScrambleStatus, EvilZero, false);
+        return;
+    }
+    for (const auto& kv : m_targetedBy) {
+        SystemEntity* t = kv.first;
+        if (t == nullptr)
+            continue;
+        if (mySE->GetAuthPosition().distance(t->GetAuthPosition()) <= maxTackleRangeM)
+            return;
+    }
+    ship->SetAttribute(AttrWarpScrambleStatus, EvilZero, false);
+}
+
 SystemEntity* TargetManager::GetFirstTarget(bool need_locked/*false*/) {
     if (m_targets.empty())
         return nullptr;
@@ -683,7 +709,7 @@ float TargetManager::TimeToLock ( ShipItemRef sRef, SystemEntity* tSE ) const {
          *     disMod = distance /10k (for 10k increments)
          *     time += disMod * 0.1
          */
-        double distance = sRef->position().distance( tSE->GetPosition());
+        double distance = mySE->GetAuthPosition().distance(tSE->GetAuthPosition());
         // check for snipers... >85k distance do NOT need additional 7.5+s to targettime
         // should we check LRT skill for pilots to modify this?  yes....not sure how to modify time using this yet...
         /*

@@ -12,7 +12,10 @@
 # functions resolve global names in the *host* module (e.g. cqview, cef, not
 # this file).  Only imports and locals from the host + session/sm/cfg/const
 # are safe.  Cross-hook state lives on __builtin__ as `_EVEMuCQStashV1`:
-#   [0] = CQ notify helper or None,  [1] = {entityID: speed EMA float}.
+#   [0] = CQ notify helper or None,  [1] = {entityID: speed EMA float},
+#   [2] = set of entityID ints for *remote* avatars the server says are
+#   seated (AO manager never marks remotes, so Biped must not use
+#   IsEntityUsingActionObject for sit locomotion).
 #
 # Functions in this file map to LiveUpdate rows like so (see
 # build_phase1_sql.py for the SQL):
@@ -41,6 +44,53 @@ CQ_EMOTE_MENU = [
     ('Fidget', 'fidget_01'),
     ('Stretch', 'fidget_02'),
 ]
+
+def _cq_resolve_remote_char_from_entity_pick(helper, picked_eid):
+    """
+    _PickObject often hits a child mesh, not the root player entity. Walk parents
+    until the id matches a registered CQ remote or we leave the tree.
+    """
+    if not helper or picked_eid is None:
+        return None
+    try:
+        eid0 = int(picked_eid)
+    except Exception:
+        return None
+    p2c = getattr(helper, '_pickEntityToChar', None)
+    try:
+        for _step in range(64):
+            if p2c:
+                try:
+                    c = p2c.get(int(eid0))
+                    if c is not None:
+                        return int(c)
+                except Exception:
+                    sys.exc_clear()
+            for cid, root in helper._avatars.iteritems():
+                if root is not None and int(root) == eid0:
+                    return int(cid)
+            ec = sm.GetService('entityClient')
+            ent = ec.FindEntityByID(eid0)
+            if ent is None:
+                return None
+            parent = getattr(ent, 'parent', None)
+            if parent is None:
+                gp = getattr(ent, 'GetParent', None)
+                if gp is not None and callable(gp):
+                    try:
+                        parent = gp()
+                    except Exception:
+                        sys.exc_clear()
+            if parent is None:
+                return None
+            p_eid = getattr(parent, 'entityID', None)
+            if p_eid is None:
+                return None
+            eid0 = int(p_eid)
+    except Exception:
+        sys.exc_clear()
+    return None
+
 
 # ---------------------------------------------------------------------------
 # Patch A: viewstate.CQView::CQView._GoStation
@@ -94,7 +144,8 @@ def _GoStation_patched(self, change):
 
             class _CQPhase1Helper(object):
                 __notifyevents__ = ['OnCharNowInStation', 'OnCharNoLongerInStation',
-                                    'OnCQAvatarMove', 'OnCQAvatarAction', 'OnCQAvatarEmote']
+                                    'OnCQAvatarMove', 'OnCQAvatarAction', 'OnCQAvatarEmote',
+                                    'OnCQCustomAgentGone']
 
                 def __init__(self):
                     self._avatars = {}
@@ -134,8 +185,19 @@ def _GoStation_patched(self, change):
                     # names anywhere else, so logging them ourselves is the
                     # only way to learn the right BroadcastRequest IDs.
                     self._animReqsLogged = {}
+                    # charID -> (aoUID, stationIdx) last time we fired sit/stand
+                    # morpheme for that remote (avoid duplicate BroadcastRequest).
+                    self._lastRemoteActMorpheme = {}
+                    # charIDs: one frame, skip position lerp so sit socket snap
+                    # (see _GetRemoteSitWorldPose) does not fight the interp tick.
+                    self._oneShotPosSnap = set()
+                    # Last seat (aoUID, stationIdx) after a successful *pose* write;
+                    # morpheme success is tracked separately — stand exit needs the seat.
+                    self._lastRemoteSitSeat = {}
+                    # root entityID -> charID for direct ray hits; sub-meshes use parent-walk in resolve.
+                    self._pickEntityToChar = {}
 
-                def Spawn(self, charID, position, yaw=0.0):
+                def Spawn(self, charID, position, yaw=0.0, appearanceOverride=0):
                     # `self._avatars[charID]` invariants:
                     #   key absent  -> no entity, free to spawn
                     #   value None  -> spawn coroutine in flight (yielded on RPC)
@@ -162,8 +224,10 @@ def _GoStation_patched(self, change):
                         # appears facing the right way the moment it pops in
                         # (no visible 1-frame snap from yaw=0 to authoritative).
                         rotation = geo2.QuaternionRotationSetYawPitchRoll(float(yaw), 0.0, 0.0)
-                        paperdolldna = sm.RemoteSvc('paperDollServer').GetPaperDollDataFor(charID)
-                        pubInfo = sm.RemoteSvc('charMgr').GetPublicInfo(charID)
+                        # instance charID may be synthetic (0xC0******); paper doll from template char
+                        doll_id = int(appearanceOverride) if appearanceOverride else int(charID)
+                        paperdolldna = sm.RemoteSvc('paperDollServer').GetPaperDollDataFor(doll_id)
+                        pubInfo = sm.RemoteSvc('charMgr').GetPublicInfo(doll_id)
                         if charID not in self._avatars:
                             log.LogInfo('[CQ-P2] Spawn: aborted while RPC in flight charID=', charID)
                             return
@@ -176,6 +240,10 @@ def _GoStation_patched(self, change):
                         if entity is not None:
                             eid = getattr(entity, 'entityID', charID)
                             self._avatars[charID] = eid
+                            try:
+                                self._pickEntityToChar[int(eid)] = int(charID)
+                            except Exception:
+                                sys.exc_clear()
                             # Seed interp targets so the avatar starts at rest
                             # at its spawn point/orientation until the next
                             # OnCQAvatarMove.
@@ -199,7 +267,7 @@ def _GoStation_patched(self, change):
                         if charID in self._avatars and self._avatars[charID] is None:
                             del self._avatars[charID]
 
-                def Update(self, charID, position, yaw=0.0):
+                def Update(self, charID, position, yaw=0.0, appearanceOverride=0):
                     # Phase 2c/d: never snap-write the entity here. Just record
                     # the new authoritative position+yaw target;
                     # _InterpolationTick eases the avatar toward it each
@@ -219,13 +287,13 @@ def _GoStation_patched(self, change):
                         ract = self._remoteActions.get(charID, (0, -1))
                         if ract[0] and ract[1] >= 0:
                             if charID not in self._avatars:
-                                self.Spawn(charID, position, yaw)
+                                self.Spawn(charID, position, yaw, appearanceOverride)
                             return
                         target = (float(position[0]), float(position[1]), float(position[2]))
                         self._targets[charID] = target
                         self._targetsYaw[charID] = float(yaw)
                         if charID not in self._avatars:
-                            self.Spawn(charID, position, yaw)
+                            self.Spawn(charID, position, yaw, appearanceOverride)
                             return
                         eid = self._avatars[charID]
                         if eid is None:
@@ -233,7 +301,7 @@ def _GoStation_patched(self, change):
                         entity = self._view.entityClient.FindEntityByID(eid)
                         if entity is None:
                             del self._avatars[charID]
-                            self.Spawn(charID, position, yaw)
+                            self.Spawn(charID, position, yaw, appearanceOverride)
                             return
                     except Exception as e:
                         log.LogException('[CQ-P2] Update error charID=' + str(charID) + ': ' + str(e))
@@ -250,6 +318,11 @@ def _GoStation_patched(self, change):
                         return
                     try:
                         eid = self._avatars[charID]
+                        try:
+                            if eid is not None:
+                                self._pickEntityToChar.pop(int(eid), None)
+                        except Exception:
+                            sys.exc_clear()
                         del self._avatars[charID]
                         if charID in self._targets:
                             del self._targets[charID]
@@ -259,6 +332,14 @@ def _GoStation_patched(self, change):
                             del self._remoteActions[charID]
                         if charID in self._animReqsLogged:
                             del self._animReqsLogged[charID]
+                        if charID in self._lastRemoteActMorpheme:
+                            del self._lastRemoteActMorpheme[charID]
+                        if charID in self._lastRemoteSitSeat:
+                            del self._lastRemoteSitSeat[charID]
+                        try:
+                            self._oneShotPosSnap.discard(charID)
+                        except Exception:
+                            sys.exc_clear()
                         if eid is None:
                             log.LogInfo('[CQ-P2] Despawn: cancelled in-flight spawn charID=', charID)
                             return
@@ -267,6 +348,8 @@ def _GoStation_patched(self, change):
                             M = getattr(b, '_EVEMuCQStashV1', None)
                             if M is not None:
                                 M[1].pop(int(eid), None)
+                                if len(M) > 2:
+                                    M[2].discard(int(eid))
                         except Exception:
                             sys.exc_clear()
                         # Best-effort: clear any AO occupancy before deleting
@@ -315,6 +398,18 @@ def _GoStation_patched(self, change):
                         log.LogException('[CQ-P2] OnCharNoLongerInStation handler error: ' + str(e))
                         sys.exc_clear()
 
+                def OnCQCustomAgentGone(self, *a, **kw):
+                    try:
+                        if len(a) < 1:
+                            return
+                        cid = int(a[0])
+                        if not cid:
+                            return
+                        self.Despawn(cid)
+                    except Exception as e:
+                        log.LogException('[CQ-P2] OnCQCustomAgentGone: ' + str(e))
+                        sys.exc_clear()
+
                 def OnCQAvatarMove(self, *a, **kw):
                     try:
                         if len(a) < 4:
@@ -327,7 +422,9 @@ def _GoStation_patched(self, change):
                         # for backward-compat with any in-flight legacy
                         # 9-tuple notifies during a server hot-swap.
                         yaw = float(a[9]) if len(a) >= 10 else 0.0
-                        self.Update(cid, position, yaw)
+                        # Index 10: paper-doll source char (0 = use cid). Station CQ custom agents.
+                        app = int(a[10]) if len(a) >= 11 else 0
+                        self.Update(cid, position, yaw, app)
                     except Exception as e:
                         log.LogException('[CQ-P2] OnCQAvatarMove handler error: ' + str(e))
                         sys.exc_clear()
@@ -392,11 +489,116 @@ def _GoStation_patched(self, change):
                 # camera to the action object, which is why B/C would snap
                 # onto A; we only need the cushion pose for interp + anims.
                 def _GetRemoteSitWorldPose(self, ao_entity, ao_comp, station_idx):
+                    # Seat world pose for the observer's copy of the couch.
+                    #
+                    # IMPORTANT: actionStations[i].worldPosition (and similar)
+                    # is often the *approach / interact* point in front of the
+                    # furniture, not the seated cushion — remotes then appear to
+                    # stand where the placer would start the sit zaction. The
+                    # static cfg row (posX/Y/Z in object space) matches the
+                    # actual sit socket, so try that first; only then fall
+                    # back to runtime getters.
                     stations = getattr(ao_comp, 'actionStations', None) or []
+                    if station_idx < 0 or station_idx >= len(stations):
+                        return None
+                    st = stations[station_idx]
                     try:
-                        if station_idx < 0 or station_idx >= len(stations):
-                            return None
-                        st = stations[station_idx]
+                        ao_data = getattr(ao_comp, 'actionObjectData', None)
+                        if ao_data is not None:
+                            aoid = int(getattr(ao_data, 'UID', 0) or 0)
+                            if aoid:
+                                rows = cfg.actionObjectStations.get(aoid) or []
+                                rows = list(rows)
+                                station_row = None
+                                if 0 <= station_idx < len(stations):
+                                    st0 = stations[station_idx]
+                                    iid = (getattr(st0, 'actionStationInstanceID', None) or
+                                           getattr(st0, 'instanceID', None) or
+                                           getattr(st0, 'InstID', None))
+                                    if iid is not None:
+                                        for r in rows:
+                                            if int(r.actionStationInstanceID) == int(iid):
+                                                station_row = r
+                                                break
+                                try:
+                                    rows.sort(key=lambda r: r.actionStationInstanceID)
+                                except Exception:
+                                    sys.exc_clear()
+                                if station_row is None and 0 <= station_idx < len(rows):
+                                    station_row = rows[station_idx]
+                                if station_row is not None:
+                                    lp = (float(station_row.posX), float(station_row.posY), float(station_row.posZ))
+                                    lq = geo2.QuaternionRotationSetYawPitchRoll(
+                                        float(station_row.rotY), float(station_row.rotX), float(station_row.rotZ)
+                                    )
+                                    pc_ao = ao_entity.GetComponent('position')
+                                    if pc_ao is not None:
+                                        ao_p = pc_ao.position
+                                        ao_r = pc_ao.rotation
+                                        if ao_r is None:
+                                            wpos = geo2.Vec3Add(ao_p, lp)
+                                            wrot = lq
+                                        else:
+                                            t = geo2.QuaternionTransformVector(ao_r, lp)
+                                            wpos = geo2.Vec3Add(t, ao_p)
+                                            wrot = geo2.QuaternionMultiply(ao_r, lq)
+                                        ypr = geo2.QuaternionRotationGetYawPitchRoll(wrot)
+                                        return (float(wpos[0]), float(wpos[1]), float(wpos[2]), float(ypr[0]))
+                    except Exception as e:
+                        log.LogException('[CQ-P2l] _GetRemoteSitWorldPose (cfg first): ' + str(e))
+                        sys.exc_clear()
+                    try:
+                        wtp = None
+                        for st_name in ('worldPosition', 'worldTranslation', 'GetWorldPosition'):
+                            cand = getattr(st, st_name, None)
+                            if cand is not None and callable(cand):
+                                try:
+                                    cand = cand()
+                                except Exception:
+                                    sys.exc_clear()
+                                    cand = None
+                            if cand is not None and len(cand) >= 3:
+                                wtp = cand
+                                break
+                        if wtp is not None and len(wtp) >= 3:
+                            wtr = None
+                            for st_name in ('worldRotation', 'GetWorldRotation'):
+                                cand = getattr(st, st_name, None)
+                                if cand is not None and callable(cand):
+                                    try:
+                                        cand = cand()
+                                    except Exception:
+                                        sys.exc_clear()
+                                        cand = None
+                                if cand is not None:
+                                    wtr = cand
+                                    break
+                            if wtr is not None:
+                                ypr = geo2.QuaternionRotationGetYawPitchRoll(wtr)
+                            else:
+                                pco = ao_entity.GetComponent('position')
+                                rot = pco.rotation if pco is not None else None
+                                if rot is not None:
+                                    ypr = geo2.QuaternionRotationGetYawPitchRoll(rot)
+                                else:
+                                    ypr = (0.0, 0.0, 0.0)
+                            log.LogInfo('[CQ-P2p] _GetRemoteSitWorldPose: using runtime fallback (cfg path missed)')
+                            return (float(wtp[0]), float(wtp[1]), float(wtp[2]), float(ypr[0]))
+                    except Exception:
+                        sys.exc_clear()
+                    return None
+
+                # Floor "use" / approach point in front of the seat (runtime
+                # worldPosition). _GetRemoteSitWorldPose prefers cfg *socket* for
+                # the cushioned sit pose; for stand-up we must move the remote's
+                # root here or the stand clip's root motion plus cushion
+                # PositionComponent reads as floating in front of the furniture.
+                def _GetRemoteApproachWorldPose(self, ao_entity, ao_comp, station_idx):
+                    stations = getattr(ao_comp, 'actionStations', None) or []
+                    if station_idx < 0 or station_idx >= len(stations):
+                        return None
+                    st = stations[station_idx]
+                    try:
                         wtp = None
                         for st_name in ('worldPosition', 'worldTranslation', 'GetWorldPosition'):
                             cand = getattr(st, st_name, None)
@@ -432,58 +634,10 @@ def _GoStation_patched(self, change):
                                 else:
                                     ypr = (0.0, 0.0, 0.0)
                             return (float(wtp[0]), float(wtp[1]), float(wtp[2]), float(ypr[0]))
-                    except Exception:
-                        sys.exc_clear()
-                    try:
-                        ao_data = getattr(ao_comp, 'actionObjectData', None)
-                        if ao_data is None:
-                            return None
-                        aoid = int(getattr(ao_data, 'UID', 0) or 0)
-                        if not aoid:
-                            return None
-                        rows = cfg.actionObjectStations.get(aoid) or []
-                        rows = list(rows)
-                        station_row = None
-                        if 0 <= station_idx < len(stations):
-                            st0 = stations[station_idx]
-                            iid = (getattr(st0, 'actionStationInstanceID', None) or
-                                   getattr(st0, 'instanceID', None) or
-                                   getattr(st0, 'InstID', None))
-                            if iid is not None:
-                                for r in rows:
-                                    if int(r.actionStationInstanceID) == int(iid):
-                                        station_row = r
-                                        break
-                        try:
-                            rows.sort(key=lambda r: r.actionStationInstanceID)
-                        except Exception:
-                            sys.exc_clear()
-                        if station_row is None and 0 <= station_idx < len(rows):
-                            station_row = rows[station_idx]
-                        if station_row is None:
-                            return None
-                        lp = (float(station_row.posX), float(station_row.posY), float(station_row.posZ))
-                        lq = geo2.QuaternionRotationSetYawPitchRoll(
-                            float(station_row.rotY), float(station_row.rotX), float(station_row.rotZ)
-                        )
-                        pc_ao = ao_entity.GetComponent('position')
-                        if pc_ao is None:
-                            return None
-                        ao_p = pc_ao.position
-                        ao_r = pc_ao.rotation
-                        if ao_r is None:
-                            wpos = geo2.Vec3Add(ao_p, lp)
-                            wrot = lq
-                        else:
-                            t = geo2.QuaternionTransformVector(ao_r, lp)
-                            wpos = geo2.Vec3Add(t, ao_p)
-                            wrot = geo2.QuaternionMultiply(ao_r, lq)
-                        ypr = geo2.QuaternionRotationGetYawPitchRoll(wrot)
-                        return (float(wpos[0]), float(wpos[1]), float(wpos[2]), float(ypr[0]))
                     except Exception as e:
-                        log.LogException('[CQ-P2l] _GetRemoteSitWorldPose: ' + str(e))
+                        log.LogException('[CQ-P2v] _GetRemoteApproachWorldPose: ' + str(e))
                         sys.exc_clear()
-                        return None
+                    return None
 
                 # Phase 2g: directly drive the remote avatar's morpheme
                 # animation network. The action tree's PerformAnim proc fires
@@ -504,7 +658,7 @@ def _GoStation_patched(self, change):
                 #      requestIDs map (BroadcastRequest no-ops with a single
                 #      LogError if the name is unknown, so trying several is
                 #      safe even when most are wrong).
-                def _DriveRemoteAnim(self, charID, candidates, label):
+                def _DriveRemoteAnim(self, charID, candidates, label, station_idx=None):
                     try:
                         eid = self._avatars.get(charID)
                         if eid is None:
@@ -529,15 +683,36 @@ def _GoStation_patched(self, change):
                         if req_ids is None:
                             log.LogError('[CQ-P2g] _DriveRemoteAnim: no requestIDs map charID=', charID)
                             return False
+                        # Fuzzy + "name in map" need string keys. If the graph only
+                        # exposes numeric request IDs, Trinity event strings like
+                        # cq_couch_sit_down_play are NOT valid BroadcastRequest
+                        # names (client logs: "does not exist!") and blind-spam
+                        # triggers move-mode warnings — do not call unknown names.
+                        str_keys = []
+                        try:
+                            for _k in req_ids:
+                                if isinstance(_k, basestring):
+                                    str_keys.append(_k)
+                        except Exception:
+                            sys.exc_clear()
+                        try:
+                            n_all = len(req_ids)
+                        except Exception:
+                            n_all = 0
+                            sys.exc_clear()
+                        if n_all and not str_keys:
+                            log.LogError('[CQ-P2g] _DriveRemoteAnim: requestIDs have no string keys; cannot match couch names charID=', charID,
+                                         ' label=', label, ' n=', n_all)
+                            return False
                         # First-time diagnostic dump per remote so we can
                         # discover the actual sit/stand request names from a
                         # single test session.
                         if not self._animReqsLogged.get(charID):
                             self._animReqsLogged[charID] = True
                             try:
-                                names = sorted(req_ids.keys())
-                                log.LogInfo('[CQ-P2g] morpheme requests for charID=', charID,
-                                            ' count=', len(names))
+                                names = sorted(str_keys)
+                                log.LogInfo('[CQ-P2g] morpheme string requestIDs for charID=', charID,
+                                            ' count=', len(names), ' (Trinity *Play* names are often not in this set)')
                                 # Chunk to avoid one absurdly long line in the
                                 # binary log; 8 names per line stays readable
                                 # in lbw text dumps.
@@ -562,17 +737,38 @@ def _GoStation_patched(self, change):
                         # real network (sittingtest2.lbw: hardcoded stand list 0/10).
                         if chosen is None and label in ('sit', 'stand'):
                             try:
-                                nml = sorted(req_ids.keys(), key=lambda s: (-len(s), s))
+                                nml = list(str_keys) if str_keys else []
                             except Exception:
-                                nml = list(req_ids.keys())
+                                nml = []
+                                sys.exc_clear()
+                            # Prefer L/C/R couch clips when the server reports a
+                            # specific cushion index (Crucible uses different
+                            # *_l_* / *_c_* / *_r_* request names; sit test 3
+                            # with idx=2 missed center-only 'cq_couch_sit_down_play').
+                            try:
+                                if label == 'sit' and station_idx in (0, 1, 2) and nml:
+                                    tag = ('_l_', '_c_', '_r_')[station_idx]
+                                    nml = sorted(
+                                        nml,
+                                        key=lambda s, t=tag: (0 if t in s.lower() else 1, -len(s), s),
+                                    )
+                                else:
+                                    nml = sorted(nml, key=lambda s: (-len(s), s))
+                            except Exception:
                                 sys.exc_clear()
                             try:
                                 for nm in nml:
                                     low = nm.lower()
                                     if label == 'sit':
-                                        if 'couch_stand' in low or 'stand_up' in low or 'standup' in low:
+                                        # Reject stand-up / rise clips that still contain
+                                        # "sit" as a substring in some names.
+                                        if (('couch_stand' in low or 'stand_up' in low
+                                             or 'standup' in low) and 'sit_down' not in low
+                                            and 'sitdown' not in low and 'couch_sit' not in low):
                                             continue
                                         for s in (
+                                                'sit_down_play', 'couch_sit_down',
+                                                '_l_play', '_c_play', '_r_play', 'sit_l', 'sit_c', 'sit_r',
                                                 'couch_sit', 'couch sit', 'sit_down', 'sitdown',
                                                 'sitting', ' sit', 'sit', 'seat', 'cushion',
                                         ):
@@ -580,9 +776,9 @@ def _GoStation_patched(self, change):
                                                 chosen = nm
                                                 break
                                     else:
-                                        # Avoid generic 'idle' / 'locomotion' (can re-target the
-                                        # wrong sm and break local walk after stand on some builds).
+                                        # Stand / get up (include *_play; see sit_cands).
                                         for s in (
+                                                'stand_up_play', 'couch_stand_up',
                                                 'couch_stand', 'couch stand', 'stand_up', 'standup',
                                                 'get_up', 'getup', 'couchstand',
                                         ):
@@ -594,8 +790,12 @@ def _GoStation_patched(self, change):
                             except Exception:
                                 sys.exc_clear()
                         if chosen is None:
-                            log.LogError('[CQ-P2g] _DriveRemoteAnim: none of ', candidates,
-                                         ' (and no fuzzy) charID=', charID, 'label=', label)
+                            if label in ('sit', 'stand'):
+                                log.LogError('[CQ-P2g] _DriveRemoteAnim: no couch/stand name in string requestIDs charID=',
+                                             charID, ' label=', label, ' (pose-only; see P2g string dump above)')
+                            else:
+                                log.LogError('[CQ-P2g] _DriveRemoteAnim: none of ', candidates,
+                                             ' (and no fuzzy) charID=', charID, 'label=', label)
                             return False
                         try:
                             if label in ('sit', 'stand') and chosen is not None:
@@ -616,11 +816,11 @@ def _GoStation_patched(self, change):
                         sys.exc_clear()
                         return False
 
-                # Phase 2l/2m: drive remotes with seat world pose (cfg) only.
-                # Do NOT run zaction OR sit/stand BroadcastRequest on another
-                # player's avatar — both can route Incarna / camera behavior on
-                # *this* client (B/C snapped when A sat). Emotes use morpheme on
-                # remotes; couch sit does not.
+                # Phase 2l/2m: cfg seat *pose*; phase 2q: sit/stand *morpheme* on the
+                # remote's AnimationController (BroadcastRequest on that entity
+                # only). Without a sit request, the mesh stays in default stand
+                # idle on the cushion. We still do NOT start zaction / AO sit on
+                # the remote (those steal camera on observers in some builds).
                 def _ApplyRemoteAction(self, charID):
                     try:
                         eid = self._avatars.get(charID)
@@ -641,12 +841,59 @@ def _GoStation_patched(self, change):
                         if avatar.GetComponent('action') is None:
                             log.LogInfo('[CQ-P2l] remote avatar (no zaction) charID=', charID)
 
-                        # Stand: pose targets only; do NOT call BroadcastRequest on
-                        # remotes — sit/stand morpheme requests can still run global
-                        # Incarna/Trinity listeners that yank *every* client's camera
-                        # toward the couch, not just zaction. Next OnCQAvatarMove sets
-                        # walk pose after stand.
+                        # Stand: if they were on a seat, request stand-up morpheme so
+                        # we do not stay in a sit clip off the furniture.
                         if idx < 0 or uid == 0:
+                            try:
+                                b0 = __import__('__builtin__')
+                                M0 = getattr(b0, '_EVEMuCQStashV1', None)
+                                if M0 is not None and len(M0) > 2:
+                                    M0[2].discard(int(eid))
+                            except Exception:
+                                sys.exc_clear()
+                            seat_rec = (self._lastRemoteSitSeat.get(charID) or
+                                        self._lastRemoteActMorpheme.get(charID) or
+                                        (0, -1))
+                            prev = self._lastRemoteActMorpheme.get(charID, (0, -1))
+                            puid = None
+                            pidx = None
+                            try:
+                                if seat_rec and len(seat_rec) >= 2:
+                                    puid = int(seat_rec[0])
+                                    pidx = int(seat_rec[1])
+                            except Exception:
+                                sys.exc_clear()
+                            if puid and pidx is not None and pidx >= 0:
+                                ao_e, ao_c = self._FindActionObjectByUID(puid)
+                                if ao_e is not None and ao_c is not None:
+                                    exit_pose = self._GetRemoteApproachWorldPose(ao_e, ao_c, pidx)
+                                    if exit_pose is not None:
+                                        ex, ey, ez, eyaw = exit_pose
+                                        try:
+                                            pcx = avatar.GetComponent('position')
+                                            if pcx is not None:
+                                                pcx.position = (ex, ey, ez)
+                                                pcx.rotation = geo2.QuaternionRotationSetYawPitchRoll(eyaw, 0.0, 0.0)
+                                            self._targets[charID] = (float(ex), float(ey), float(ez))
+                                            self._targetsYaw[charID] = float(eyaw)
+                                            self._oneShotPosSnap.add(charID)
+                                            log.LogInfo('[CQ-P2v] remote stand exit pose (approach) charID=', charID,
+                                                        'x=', ex, 'y=', ey, 'z=', ez, 'yaw=', eyaw)
+                                        except Exception:
+                                            log.LogException('[CQ-P2v] stand exit pose write')
+                                            sys.exc_clear()
+                            if seat_rec[1] is not None and int(seat_rec[1]) >= 0:
+                                # Crucible logs Trinity: cq_couch_stand_up_play — requestIDs
+                                # use the same *Play suffix as the morpheme network.
+                                st_cands = (
+                                    'cq_couch_stand_up_play', 'couch_stand_up_play',
+                                    'cq_couch_stand_up', 'couch_stand_up', 'couch_stand',
+                                    'stand_up', 'standup', 'get_up', 'getup', 'couchstand',
+                                )
+                                self._DriveRemoteAnim(charID, st_cands, 'stand', None)
+                            self._lastRemoteActMorpheme[charID] = (0, -1)
+                            if charID in self._lastRemoteSitSeat:
+                                del self._lastRemoteSitSeat[charID]
                             return
 
                         ao_entity, ao_comp = self._FindActionObjectByUID(uid)
@@ -673,12 +920,57 @@ def _GoStation_patched(self, change):
                                 pc0.rotation = geo2.QuaternionRotationSetYawPitchRoll(wyaw, 0.0, 0.0)
                             self._targets[charID] = (float(wx), float(wy), float(wz))
                             self._targetsYaw[charID] = float(wyaw)
-                            log.LogInfo('[CQ-P2m] remote sit pose only (no morpheme) charID=', charID,
+                            self._oneShotPosSnap.add(charID)
+                            log.LogInfo('[CQ-P2m] remote sit pose charID=', charID,
                                         'x=', wx, 'y=', wy, 'z=', wz, 'yaw=', wyaw)
                         except Exception:
                             log.LogException('[CQ-P2l] _ApplyRemoteAction sit pose write')
                             sys.exc_clear()
                             return
+                        try:
+                            b1 = __import__('__builtin__')
+                            M1 = getattr(b1, '_EVEMuCQStashV1', None)
+                            if M1 is None:
+                                M1 = [None, {}, set()]
+                                setattr(b1, '_EVEMuCQStashV1', M1)
+                            elif len(M1) < 3:
+                                M1.append(set())
+                            M1[2].add(int(eid))
+                        except Exception:
+                            sys.exc_clear()
+                        self._lastRemoteSitSeat[charID] = (int(uid), int(idx))
+                        act_key = (int(uid), int(idx))
+                        if self._lastRemoteActMorpheme.get(charID) != act_key:
+                            # L/C/R seats use different *Play / morpheme names in Crucible;
+                            # idx=2 (right) does not use the same request as center.
+                            if int(idx) == 0:
+                                per = (
+                                    'cq_couch_sit_down_l_play', 'couch_sit_down_l_play', 'couch_sit_l_play',
+                                    'cq_sit_l_down', 'cq_couch_sit_l', 'sit_l_down',
+                                )
+                            elif int(idx) == 1:
+                                per = (
+                                    'cq_couch_sit_down_play', 'couch_sit_down_play',
+                                    'cq_couch_sit_down_c_play', 'couch_sit_c_play', 'couch_sit_c',
+                                )
+                            else:
+                                per = (
+                                    'cq_couch_sit_down_r_play', 'couch_sit_down_r_play', 'couch_sit_r_play',
+                                    'cq_sit_r_down', 'cq_couch_sit_r', 'sit_r_down', 'couch_sit_r',
+                                )
+                            rest = (
+                                'cq_couch_sit_down_play', 'couch_sit_down_play',
+                                'cq_couch_sit_down', 'cq_couch_sit', 'couch_sit_down',
+                                'couch_sit', 'couch_sit_l', 'couch_sit_c', 'couch_sit_r',
+                                'sit_down', 'sitdown', 'SIT', 'inc_sit', 'Inc_Sit',
+                            )
+                            sit_cands = per + rest
+                            if self._DriveRemoteAnim(charID, sit_cands, 'sit', int(idx)):
+                                self._lastRemoteActMorpheme[charID] = act_key
+                                log.LogInfo('[CQ-P2q] remote sit morpheme ok charID=', charID, 'act=', act_key)
+                            else:
+                                log.LogError('[CQ-P2q] remote sit morpheme miss charID=', charID,
+                                             ' (see P2g req dump); pose still applied')
                     except Exception as e:
                         log.LogException('[CQ-P2f] _ApplyRemoteAction error charID=' + str(charID) + ': ' + str(e))
                         sys.exc_clear()
@@ -930,6 +1222,9 @@ def _GoStation_patched(self, change):
                                     pos_comp = entity.GetComponent('position')
                                     if pos_comp is None:
                                         continue
+                                    if cid in self._oneShotPosSnap:
+                                        self._oneShotPosSnap.discard(cid)
+                                        pos_comp.position = (target[0], target[1], target[2])
                                     cur = pos_comp.position
                                     cx = float(cur[0])
                                     cy = float(cur[1])
@@ -988,8 +1283,11 @@ def _GoStation_patched(self, change):
             k = '_EVEMuCQStashV1'
             M = getattr(b, k, None)
             if M is None:
-                M = [None, {}]
+                M = [None, {}, set()]
                 setattr(b, k, M)
+            else:
+                if len(M) < 3:
+                    M.append(set())
             M[0] = self._cqPhase1Helper
             sm.RegisterNotify(self._cqPhase1Helper)
             log.LogInfo('[CQ-P2] registered notify helper')
@@ -997,8 +1295,11 @@ def _GoStation_patched(self, change):
             b = __import__('__builtin__')
             M = getattr(b, '_EVEMuCQStashV1', None)
             if M is None:
-                M = [None, {}]
+                M = [None, {}, set()]
                 setattr(b, '_EVEMuCQStashV1', M)
+            else:
+                if len(M) < 3:
+                    M.append(set())
             M[0] = self._cqPhase1Helper
         cq = util.Moniker('captainsQuartersSvc', (ws, const.groupWorldSpace))
         cq.SetSessionCheck({'worldspaceid': ws})
@@ -1048,12 +1349,13 @@ def _GoStation_patched(self, change):
                         # Phase 2f: rows 10/11 = (actionObjectUID, stationIdx).
                         # Stash before Spawn so Spawn's _ApplyRemoteAction
                         # call can pick the value up immediately.
+                        rapp = int(row[12]) if len(row) >= 13 else 0
                         if len(row) >= 12:
                             ruid = int(row[10])
                             ridx = int(row[11])
                             if ridx >= 0 and ruid:
                                 self._cqPhase1Helper._remoteActions[rcid] = (ruid, ridx)
-                        self._cqPhase1Helper.Spawn(rcid, rpos, ryaw)
+                        self._cqPhase1Helper.Spawn(rcid, rpos, ryaw, rapp)
                     except Exception as inner:
                         log.LogException('[CQ-P2] snapshot row spawn error: ' + str(inner))
                         sys.exc_clear()
@@ -1115,6 +1417,11 @@ def UnloadView_patched(self):
                         M[1].clear()
                     except Exception:
                         sys.exc_clear()
+                    try:
+                        if len(M) > 2:
+                            M[2].clear()
+                    except Exception:
+                        sys.exc_clear()
             except Exception:
                 sys.exc_clear()
     except Exception as e:
@@ -1170,10 +1477,12 @@ def ClientOnlyPlayerSpawner_GetRecipe_patched(self, entityRecipeSvc):
 
 
 # ---------------------------------------------------------------------------
-# Patch F: uicls.CharControl (EveCharControl).GetMenu — Emotes submenu on self
-# in shared CQ (right-click your avatar on the world pick ray).
+# Patch F: CharControl.GetMenu (base) + EveCharControl.GetMenu — Emotes on self,
+# Agent -> Start conversation for remotes / CQ custom agents (mission char id).
+# Crucible CQ often uses the base CharControl instance, not EveCharControl, so
+# both must be patched or right-clicks never reach agentMgr (see lbw diff).
 # ---------------------------------------------------------------------------
-def EveCharControl_GetMenu_patched(self):
+def _cq_charcontrol_getmenu_impl(self):
     # Emote list must be local: host module has no CQ_EMOTE_MENU global.
     EM = (('Wave', 'emote_wave'),
      ('Bow', 'emote_bow'),
@@ -1212,25 +1521,86 @@ def EveCharControl_GetMenu_patched(self):
     try:
         if entityID and session.worldspaceid:
             ec = sm.GetService('entityClient')
-            if ec.IsClientSideOnly(session.worldspaceid):
+            h_ok = False
+            M2 = None
+            try:
+                b = __import__('__builtin__')
+                M2 = getattr(b, '_EVEMuCQStashV1', None)
+                h_ok = M2 is not None and M2[0] is not None
+            except Exception:
+                sys.exc_clear()
+            # Crucible: IsClientSideOnly can be false in shared CQ; our _GoStation helper is authoritative.
+            ws_client_only = False
+            try:
+                ws_client_only = ec.IsClientSideOnly(session.worldspaceid)
+            except Exception:
+                sys.exc_clear()
+            if h_ok or ws_client_only:
                 pl = ec.GetPlayerEntity()
-                h_ok = False
-                try:
-                    b = __import__('__builtin__')
-                    M2 = getattr(b, '_EVEMuCQStashV1', None)
-                    h_ok = M2 is not None and M2[0] is not None
-                except Exception:
-                    sys.exc_clear()
                 if pl is not None and pl.entityID == entityID and EM and h_ok:
                     m.append(None)
                     sub = []
                     for i in range(len(EM)):
                         sub.append((EM[i][0], _emote_cb, (i,)))
                     m.append(('Emotes', sub))
+                    m.append(None)
+
+                    def _cq_reg():
+                        try:
+                            mon = getattr(M2[0], '_moniker', None) if h_ok and M2[0] else None
+                            if mon is None:
+                                return
+                            n = mon.CQDebugRegisterAgentHere(session.charid, 'rclick')
+                            if n is not None:
+                                if len(M2) < 4:
+                                    M2.append(None)
+                                M2[3] = n
+                                log.LogInfo('[CQ] CQDebugRegisterAgentHere -> instance', n)
+                        except Exception as e:
+                            log.LogException('[CQ] CQDebugRegisterAgentHere: ' + str(e))
+                            sys.exc_clear()
+
+                    def _cq_move_last():
+                        try:
+                            mon = getattr(M2[0], '_moniker', None) if h_ok and M2[0] else None
+                            if mon is None or len(M2) < 4 or M2[3] is None:
+                                log.LogWarn('[CQ] CQDebugUpdateAgentHere: no last instance (register first)')
+                                return
+                            mon.CQDebugUpdateAgentHere(int(M2[3]))
+                        except Exception as e:
+                            log.LogException('[CQ] CQDebugUpdateAgentHere: ' + str(e))
+                            sys.exc_clear()
+
+                    m.append(('EVEmu CQ (dev role)', (('Register static agent (my paper doll)', _cq_reg, ()),
+                        ('Reposition last static agent to me', _cq_move_last, ()))))
+                if pl is not None and entityID and entityID != pl.entityID and h_ok:
+                    rem_cid = None
+                    try:
+                        rem_cid = _cq_resolve_remote_char_from_entity_pick(M2[0], entityID)
+                    except Exception:
+                        sys.exc_clear()
+                    if rem_cid is not None:
+                        def _agent_talk_cb(rc=rem_cid):
+                            try:
+                                mon = util.Moniker('agentMgr', (rc,))
+                                mon.DoAction(None)
+                            except Exception as e3:
+                                log.LogException('[CQ] agentMgr DoAction (Start conversation): ' + str(e3))
+                                sys.exc_clear()
+                        m.append(None)
+                        m.append(('Agent', (('Start conversation', _agent_talk_cb, ()),)))
     except Exception:
-        log.LogException('[CQ-P3] EveCharControl GetMenu emote append error')
+        log.LogException('[CQ-P3] CharControl GetMenu emote append error')
         sys.exc_clear()
     return m
+
+
+def EveCharControl_GetMenu_patched(self):
+    return _cq_charcontrol_getmenu_impl(self)
+
+
+def CharControl_GetMenu_patched(self):
+    return _cq_charcontrol_getmenu_impl(self)
 
 
 # ---------------------------------------------------------------------------
@@ -1256,6 +1626,8 @@ def EveCharControl_GetMenu_patched(self):
 # Phase 2i/2k: for *remote* CQ avatars only, skip locomotion when the
 # ActionObjectManager reports the entity is using a couch, so idle
 # locomotion does not override sit morpheme.
+# Phase 2r: remotes never register with the AO manager; _EVEMuCQStashV1[2]
+# holds entity IDs the server said are seated — skip walk Speed there too.
 # NEVER do this for the local pilot (entityID==session.charid): in CQ the
 # local entity can still be driven by BipedAnimationController; skipping
 # here breaks walk after stand and can confuse AO/interaction.
@@ -1272,14 +1644,29 @@ def BipedAnimationController_UpdateMovement_patched(self):
     k = '_EVEMuCQStashV1'
     M = getattr(b, k, None)
     if M is None:
-        M = [None, {}]
+        M = [None, {}, set()]
         setattr(b, k, M)
+    else:
+        if len(M) < 3:
+            M.append(set())
     sp = M[1]
     try:
         eref = getattr(self, 'entityRef', None)
         if eref is not None:
             eidA = getattr(eref, 'entityID', None)
             if eidA is not None and eidA != session.charid:
+                try:
+                    if int(eidA) in M[2]:
+                        try:
+                            sp.pop(int(eidA), None)
+                        except Exception:
+                            sys.exc_clear()
+                        self.SetControlParameter('Speed', 0.0)
+                        self.SetControlParameter('Moving', 0)
+                        self.SetControlParameter('TurnAngle', 0.0)
+                        return
+                except Exception:
+                    sys.exc_clear()
                 ao = sm.GetService('actionObjectClientSvc')
                 if ao is not None and getattr(ao, 'manager', None) is not None:
                     if ao.manager.IsEntityUsingActionObject(eidA):
@@ -1287,6 +1674,9 @@ def BipedAnimationController_UpdateMovement_patched(self):
                             sp.pop(int(eidA), None)
                         except Exception:
                             sys.exc_clear()
+                        self.SetControlParameter('Speed', 0.0)
+                        self.SetControlParameter('Moving', 0)
+                        self.SetControlParameter('TurnAngle', 0.0)
                         return
     except Exception:
         sys.exc_clear()

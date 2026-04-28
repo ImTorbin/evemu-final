@@ -13,6 +13,7 @@
 
 #include "ServiceDB.h"
 #include "inventory/ItemType.h"
+#include <vector>
 
 
 class StationDB
@@ -48,6 +49,12 @@ public:
     static void GetOwnerIDsOfClonesAtStation(uint32 stationID, uint32 corpID, DBQueryResult& res);
     static void GetOutpostImprovementStaticData(DBQueryResult& res);
     static void GetOutpostImprovements(uint32 stationID, DBQueryResult& res);
+
+    /** When static `m_stationList` has no entry for a system, resolve stations from `staStations`. */
+    static bool         GetStationsInSolarSystem(uint32 solarSystemID, std::vector<uint32>& into);
+
+    /** If `StaticDataMgr::GetStationSystem` is 0, still resolve from DB (e.g. client pathfinder needs a non-0 id). */
+    static uint32       GetSolarSystemIDForStation(uint32 stationID);
 
 };
 

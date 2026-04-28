@@ -26,6 +26,12 @@
 
 #include "eve-server.h"
 
+#include "notify/DiscordWebhook.h"
+
+#include "StaticDataMgr.h"
+
+#include <algorithm>
+
 #include "ConsoleCommands.h"
 #include "Client.h"
 #include "Container.h"
@@ -112,7 +118,7 @@ void SystemEntity::MakeDamageState(DoDestinyDamageState &into) {
     into.recharge = 110000;
     into.armor = 1;
     into.structure = 1;
-    into.timestamp = GetFileTimeNow();
+    into.timestamp = GetFileTimeNowInt64();
 }
 
 PyDict* SystemEntity::MakeSlimItem() {
@@ -172,7 +178,7 @@ void SystemEntity::Delete()
 double SystemEntity::DistanceTo2(const SystemEntity* other) {
     if (other->m_bubble == nullptr)
         return 1000000.0;
-    return GetPosition().distance(other->GetPosition());
+    return GetAuthPosition().distance(other->GetAuthPosition());
 }
 
 void SystemEntity::SendDamageStateChanged() {  //working 24Apr15
@@ -188,13 +194,22 @@ void SystemEntity::SendDamageStateChanged() {  //working 24Apr15
      DamageDetails dmgState;
         dmgState.shield = m_self->GetAttribute(AttrShieldCharge).get_double() / shieldCap;
         dmgState.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_double();
-        dmgState.timestamp = GetFileTimeNow();
+        dmgState.timestamp = GetFileTimeNowInt64();
         dmgState.armor = (1.0 - (m_self->GetAttribute(AttrArmorDamage).get_double() / armorHP));
         dmgState.structure = (1.0 - (m_self->GetAttribute(AttrDamage).get_double() / hullHP));
      OnDamageStateChange dmgChange;
         dmgChange.entityID = m_self->itemID();
         dmgChange.state = dmgState.Encode();
     PyTuple *up = dmgChange.Encode();
+    // Own ship HUD: Destiny only received OnDamageStateChange for this entity when other *players*
+    // had us locked (QueueUpdate -> m_targetedBy). NPC attackers have no pilot, so solo PvE never
+    // delivered this packet to the damaged ship's client — shield/armor/structure bars did not update.
+    /* Always immediate for the damaged pilot: queued DoDestinyUpdate can reorder behind OnMultiEvent or be
+     * flushed late; HUD rings use this packet alongside godma shield/armor attrs. */
+    if (HasPilot()) {
+        PyIncRef(up);
+        GetPilot()->EmitDestinyUpdateNow(&up);
+    }
     if (m_targMgr != nullptr)
         m_targMgr->QueueUpdate(&up);
     PySafeDecRef(up);
@@ -202,7 +217,7 @@ void SystemEntity::SendDamageStateChanged() {  //working 24Apr15
             m_self->name(), m_self->itemID(), dmgState.shield, dmgState.armor, dmgState.structure);
 }
 
-void SystemEntity::DropLoot(WreckContainerRef wreckRef, uint32 groupID, uint32 owner) {
+void SystemEntity::DropLoot(WreckContainerRef wreckRef, uint32 groupID, uint32 owner, bool killerIsPlayerCharacter) {
     /*   allan 27Nov14    */
     std::vector<LootList> lootList;
     sDataMgr.GetLoot(groupID, lootList);
@@ -211,21 +226,55 @@ void SystemEntity::DropLoot(WreckContainerRef wreckRef, uint32 groupID, uint32 o
         return;
     }
 
-    uint32 quantity(0);
+    struct Roll {
+        uint32 typeID{};
+        uint32 qty{};
+        double lineISK{ 0.0 };
+        uint8 metaLvl{ 0 };
+    };
+    std::vector<Roll> rolls;
+    rolls.reserve(lootList.size());
+
     std::vector<LootList>::iterator itr = lootList.begin();
     while (itr != lootList.end()) {
+        uint32 quantity(0);
         if (itr->minDrop == itr->maxDrop) {
             quantity = itr->minDrop;
         } else {
-            quantity = (uint32)(MakeRandomInt(itr->minDrop, itr->maxDrop));
+            quantity = static_cast<uint32>(MakeRandomInt(itr->minDrop, itr->maxDrop));
         }
         if (quantity == 0)
             quantity = 1;
 
-        ItemData iLoot(itr->itemID, owner, wreckRef->itemID(), flagNone, quantity);
-        wreckRef->AddItem(sItemFactory.SpawnItem(iLoot));
-        _log(LOOT__INFO, "added %u of %u to list for %s(%u)", quantity, itr->itemID, m_self->name(), m_self->itemID());
+        Roll R;
+        R.qty = quantity;
+        R.typeID = itr->itemID;
+        if (sDataMgr.HasType(itr->itemID)) {
+            Inv::TypeData td;
+            sDataMgr.GetType(itr->itemID, td);
+            R.lineISK = td.basePrice * static_cast<double>(quantity);
+            R.metaLvl = sDataMgr.ResolveTypeMetaLevel(itr->itemID, td);
+        }
+        rolls.emplace_back(R);
         ++itr;
+    }
+
+    uint32 sysID = m_system != nullptr ? m_system->GetID() : 0u;
+    std::string sysName;
+    if (m_system != nullptr)
+        sysName = m_system->GetNameStr();
+
+    std::vector<DiscordLootLine> webhookLines;
+    webhookLines.reserve(rolls.size());
+    for (const Roll& R : rolls)
+        webhookLines.push_back(DiscordLootLine{ R.typeID, R.qty, R.lineISK, R.metaLvl });
+
+    DiscordWebhook_NotifyRareLoot(m_self->itemName(), groupID, sysID, sysName, webhookLines, killerIsPlayerCharacter);
+
+    for (const Roll& R : rolls) {
+        ItemData iLoot(R.typeID, owner, wreckRef->itemID(), flagNone, R.qty);
+        wreckRef->AddItem(sItemFactory.SpawnItem(iLoot));
+        _log(LOOT__INFO, "added %u of %u to list for %s(%u)", R.qty, R.typeID, m_self->name(), m_self->itemID());
     }
 }
 
@@ -303,6 +352,8 @@ bool StaticSystemEntity::LoadExtras() {
 PyDict* StaticSystemEntity::MakeSlimItem() {
     _log(SE__SLIMITEM, "MakeSlimItem for SSE %s(%u)", GetName(), m_self->itemID());
     PyDict *slim = new PyDict();
+        // Must match BallHeader.entityID / SystemEntity::MakeSlimItem — client warp (GetWarpCollisions) looks up balls by ballID.
+        slim->SetItemString("ballID",      new PyLong(m_self->itemID()));
         slim->SetItemString("itemID",       new PyLong(m_self->itemID()));
         slim->SetItemString("typeID",       new PyInt(m_self->typeID()));
         slim->SetItemString("name",         new PyString(m_self->itemName()));
@@ -391,6 +442,7 @@ PyDict* StargateSE::MakeSlimItem() {
         rotation->SetItem(1, new PyFloat(0));
         rotation->SetItem(2, new PyFloat(0));*/
     PyDict *slim = new PyDict();
+        slim->SetItemString("ballID",      new PyLong(m_self->itemID()));
         //slim->SetItemString("dunRotation", rotation);
         slim->SetItemString("typeID",       new PyInt(m_self->typeID()));
         /** @todo (allan) make function to lookup controlling faction id for this */
@@ -423,6 +475,7 @@ ItemSystemEntity::ItemSystemEntity(const ItemSystemEntity* oth)
 PyDict* ItemSystemEntity::MakeSlimItem() {
     _log(SE__SLIMITEM, "MakeSlimItem for ISE %s(%u)", GetName(), m_self->itemID());
     PyDict *slim = new PyDict();
+        slim->SetItemString("ballID",      new PyLong(m_self->itemID()));
         slim->SetItemString("itemID",       new PyLong(m_self->itemID()));
         slim->SetItemString("typeID",       new PyInt(m_self->typeID()));
         slim->SetItemString("ownerID",      new PyInt(m_ownerID));
@@ -504,7 +557,7 @@ void ItemSystemEntity::MakeDamageState(DoDestinyDamageState &into) {
             hullHP = 0.0001;
         into.shield = (m_self->GetAttribute(AttrShieldCharge).get_double() / shieldCap);
         into.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_double();
-        into.timestamp = GetFileTimeNow();
+        into.timestamp = GetFileTimeNowInt64();
         into.armor = 1.0 - (m_self->GetAttribute(AttrArmorDamage).get_double() / armorHP);
         into.structure = 1.0 - (m_self->GetAttribute(AttrDamage).get_double() / hullHP);
     }
@@ -644,7 +697,7 @@ void ObjectSystemEntity::MakeDamageState(DoDestinyDamageState &into) {
         hullHP = 0.0001;
     into.shield = (m_self->GetAttribute(AttrShieldCharge).get_double() / shieldCap);
     into.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_double();
-    into.timestamp = GetFileTimeNow();
+    into.timestamp = GetFileTimeNowInt64();
     into.armor = 1.0 - (m_self->GetAttribute(AttrArmorDamage).get_double() / armorHP);
     into.structure = 1.0 - (m_self->GetAttribute(AttrDamage).get_double() / hullHP);
 }
@@ -656,7 +709,7 @@ void ObjectSystemEntity::UpdateDamage()
      DamageDetails dmgState;
         dmgState.shield = m_self->GetAttribute(AttrShieldCharge).get_double() / m_self->GetAttribute(AttrShieldCapacity).get_double();
         dmgState.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_double();
-        dmgState.timestamp = GetFileTimeNow();
+        dmgState.timestamp = GetFileTimeNowInt64();
         dmgState.armor = 1.0 - m_self->GetAttribute(AttrArmorDamage).get_double() / m_self->GetAttribute(AttrArmorHP).get_double();
         dmgState.structure = 1.0 - m_self->GetAttribute(AttrDamage).get_double() / m_self->GetAttribute(AttrHP).get_double();
      OnDamageStateChange dmgChange;
@@ -797,7 +850,7 @@ void DynamicSystemEntity::MakeDamageState(DoDestinyDamageState &into) {
         hullHP = 0.0001;
     into.shield = (m_self->GetAttribute(AttrShieldCharge).get_double() / shieldCap);
     into.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_double();
-    into.timestamp = GetFileTimeNow();
+    into.timestamp = GetFileTimeNowInt64();
     into.armor = 1.0 - (m_self->GetAttribute(AttrArmorDamage).get_double() / armorHP);
     into.structure = 1.0 - (m_self->GetAttribute(AttrDamage).get_double() / hullHP);
 }
@@ -809,7 +862,7 @@ void DynamicSystemEntity::UpdateDamage()
      DamageDetails dmgState;
         dmgState.shield = m_self->GetAttribute(AttrShieldCharge).get_double() / m_self->GetAttribute(AttrShieldCapacity).get_double();
         dmgState.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_double();
-        dmgState.timestamp = GetFileTimeNow();
+        dmgState.timestamp = GetFileTimeNowInt64();
         dmgState.armor = 1.0 - m_self->GetAttribute(AttrArmorDamage).get_double() / m_self->GetAttribute(AttrArmorHP).get_double();
         dmgState.structure = 1.0 - m_self->GetAttribute(AttrDamage).get_double() / m_self->GetAttribute(AttrHP).get_double();
      OnDamageStateChange dmgChange;
@@ -847,6 +900,15 @@ void DynamicSystemEntity::AwardBounty(Client* pClient)
         // get fleet members onGrid and distrubute bounty
         std::vector< uint32 > members;
         sFltSvc.GetFleetMembersOnGrid(pClient, members);
+        if (members.empty()) {
+            data.amount = bounty;
+            if (sConfig.server.BountyPayoutDelayed) {
+                m_system->AddBounty(pClient->GetCharacterID(), data);
+            } else {
+                AccountService::TransferFunds(corpCONCORD, pClient->GetCharacterID(), bounty, reason.c_str(), Journal::EntryType::BountyPrize, -GetTypeID());
+            }
+            return;
+        }
         // split bounty between members
         bounty /= members.size();
         // send bounty to members

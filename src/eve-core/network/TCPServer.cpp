@@ -26,6 +26,12 @@
 
 #include "eve-core.h"
 
+#if defined( _WIN32 )
+#include <Ws2tcpip.h>
+#else
+#include <arpa/inet.h>
+#endif
+
 #include "network/TCPServer.h"
 #include "log/LogNew.h"
 #include "log/logsys.h"
@@ -58,7 +64,7 @@ bool BaseTCPServer::IsOpen() const
     return ret;
 }
 
-bool BaseTCPServer::Open( uint16 port, char* errbuf )
+bool BaseTCPServer::Open( uint16 port, char* errbuf, const char* bindAddress )
 {
     if (errbuf != nullptr)
         errbuf[0] = 0;
@@ -89,7 +95,17 @@ bool BaseTCPServer::Open( uint16 port, char* errbuf )
     memset( &address, 0, sizeof( address ) );
     address.sin_family = AF_INET;
     address.sin_port = htons( port );
-    address.sin_addr.s_addr = htonl( INADDR_ANY );
+    if (bindAddress != nullptr && bindAddress[0] != '\0') {
+        if (inet_pton( AF_INET, bindAddress, &address.sin_addr ) != 1) {
+            _log(TCP_SERVER__ERROR, "Open()::inet_pton() failed for bind address '%s'", bindAddress );
+            if (errbuf)
+                snprintf( errbuf, TCPSRV_ERRBUF_SIZE, "Invalid bind address '%s'", bindAddress );
+            SafeDelete( mSock );
+            return false;
+        }
+    } else {
+        address.sin_addr.s_addr = htonl( INADDR_ANY );
+    }
 
     if (mSock->bind((sockaddr*)&address, sizeof(address)) < 0) {
         _log(TCP_SERVER__ERROR, "Open()::bind() < 0" );

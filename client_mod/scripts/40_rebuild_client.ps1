@@ -9,9 +9,9 @@
       3. Made your patches in <CodeRoot>.
 
     The script compiles the tree, backs up the existing compiled.code in
-    place, and installs the rebuilt file. blue.dll is assumed to already
-    be patched (blue.dll.bak present). Pass -PatchBlue to force a
-    re-patch.
+    place, and installs the rebuilt file. It then runs 42_patch_blue_manifest.ps1
+    (VerifyManifest JNZ bypass). blue_patcher is separate: pass -PatchBlue to
+    re-run it if blue.dll was replaced.
 
 .PARAMETER EVEInstall
     The Crucible install whose script\compiled.code we replace.
@@ -116,21 +116,63 @@ if ($PatchBlue) {
     } finally { Pop-Location }
 }
 
+# Crucible builds differ: some installs only have script\compiled.code, others use
+# bin\script\compiled.code (see README). The loader may prefer bin\script; install
+# the same blob to every location that exists or is standard, so we never run a
+# stock signed file from one path and a rebuilt file from another.
 $compiledCandidates = @('script\compiled.code', 'bin\script\compiled.code', 'bin\compiled.code')
-$targetCompiled = $null
+$anchor = $null
 foreach ($candidate in $compiledCandidates) {
     $p = Join-Path $EVEInstall $candidate
-    if (Test-Path $p) { $targetCompiled = $p; break }
+    if (Test-Path $p) { $anchor = $p; break }
 }
-if (-not $targetCompiled) { throw "Could not find existing compiled.code under $EVEInstall" }
+if (-not $anchor) { throw "Could not find existing compiled.code under $EVEInstall" }
 
-$targetBackup = "$targetCompiled.crucible_orig"
+$targetBackup = "$anchor.crucible_orig"
 if (-not (Test-Path $targetBackup)) {
-    Copy-Item $targetCompiled $targetBackup -Force
+    Copy-Item $anchor $targetBackup -Force
     Write-Host "Backed up original compiled.code to $targetBackup"
 }
-Copy-Item $compiledOut $targetCompiled -Force
-Write-Host "Installed rebuilt compiled.code at $targetCompiled" -ForegroundColor Green
+
+$installTargets = New-Object System.Collections.Generic.HashSet[string]
+[void]$installTargets.Add($anchor)
+$scriptDir = Join-Path $EVEInstall 'script'
+$scriptCode = Join-Path $scriptDir 'compiled.code'
+if (Test-Path $scriptDir) { [void]$installTargets.Add($scriptCode) }
+$binScriptCode = Join-Path $EVEInstall 'bin\script\compiled.code'
+[void]$installTargets.Add($binScriptCode)
+$binCode = Join-Path $EVEInstall 'bin\compiled.code'
+if (Test-Path $binCode) { [void]$installTargets.Add($binCode) }
+
+foreach ($targetCompiled in $installTargets) {
+    $parent = Split-Path $targetCompiled
+    if (-not (Test-Path $parent)) {
+        New-Item -ItemType Directory -Force -Path $parent | Out-Null
+        Write-Host "Created $parent"
+    }
+    Copy-Item $compiledOut $targetCompiled -Force
+    Write-Host "Installed rebuilt compiled.code at $targetCompiled" -ForegroundColor Green
+}
+
+# blue_patcher.exe only clears one JNZ; Crucible still needs the VerifyManifest bypass
+# (see utils/dev/patcher.cpp and 42_patch_blue_manifest.ps1).
+$manifestScript = Join-Path $PSScriptRoot '42_patch_blue_manifest.ps1'
+if (Test-Path $manifestScript) {
+    try {
+        & $manifestScript -EVEInstall $EVEInstall
+    } catch {
+        Write-Warning "VerifyManifest patch failed - close EVE and run 42_patch_blue_manifest.ps1: $_"
+    }
+}
+
+$pubkeyScript = Join-Path $PSScriptRoot '43_patch_blue_evecc_pubkey.ps1'
+if (Test-Path $pubkeyScript) {
+    try {
+        & $pubkeyScript -EVEInstall $EVEInstall -ToolDir $ToolDir
+    } catch {
+        Write-Warning "evecc pubkey inject failed - run 43_patch_blue_evecc_pubkey.ps1: $_"
+    }
+}
 
 Write-Host "`n--- current ini state ---"
 foreach ($ini in 'common.ini', 'start.ini') {

@@ -1050,6 +1050,7 @@ void Client::CreateShipSE() {
         data.corporationID = GetCorporationID();
         data.factionID = GetWarFactionID();
         data.ownerID = GetCharacterID();
+    m_ship->SanitizeSimulatorRechargeAttributes();
     pShipSE = new ShipSE(m_ship, m_system->GetServiceMgr(), m_system, data);
     _log(PLAYER__MESSAGE, "CreateShipSE() - pShipSE %p created for %s(%u)", pShipSE, m_char->name(), m_char->itemID());
 }
@@ -1068,6 +1069,7 @@ void Client::DestroyShipSE() {
 void Client::UpdateNewShip()
 {
     sItemFactory.SetUsingClient(this);
+    m_ship->SanitizeSimulatorRechargeAttributes();
     pShipSE->SetPilot(this);
     pShipSE->DestinyMgr()->UpdateNewShip(m_ship);
     sItemFactory.UnsetUsingClient();
@@ -1123,6 +1125,7 @@ void Client::BoardShip(ShipItemRef newShipRef)
     }
 
     SetShip(newShipRef);
+    newShipRef->SanitizeSimulatorRechargeAttributes();
     SetSessionTimer();
 }
 
@@ -1147,7 +1150,7 @@ void Client::Board(ShipSE* newShipSE)
         if (pShipSE->SysBubble()->HasTower()) {
             TowerSE* ptSE = pShipSE->SysBubble()->GetTowerSE();
             if (ptSE->HasForceField())
-                if (pShipSE->GetPosition().distance(ptSE->GetPosition()) < ptSE->GetSOI())
+                if (pShipSE->GetAuthPosition().distance(ptSE->GetAuthPosition()) < ptSE->GetSOI())
                     abandoned = false;
         }
 
@@ -1201,7 +1204,7 @@ void Client::Eject()
     if (pShipSE->SysBubble()->HasTower()) {
         TowerSE* ptSE = pShipSE->SysBubble()->GetTowerSE();
         if (ptSE->HasForceField())
-            if (pShipSE->GetPosition().distance(ptSE->GetPosition()) < ptSE->GetSOI())
+            if (pShipSE->GetAuthPosition().distance(ptSE->GetAuthPosition()) < ptSE->GetSOI())
                 abandoned = false;
     }
 
@@ -1220,7 +1223,7 @@ void Client::Eject()
 
     pShipSE->DestinyMgr()->Eject();
 
-    GPoint capsulePosition(pShipSE->GetPosition());
+    GPoint capsulePosition(pShipSE->GetAuthPosition());
     capsulePosition.MakeRandomPointOnSphere(m_ship->radius() + m_pod->radius() + MakeRandomInt(30, 120));
     m_pod->SetPosition(capsulePosition);
     m_pod->Move(m_locationID, flagCapsule, true);
@@ -1867,6 +1870,12 @@ bool Client::IsMissionComplete(MissionOffer& data)
         case Mission::Type::Tutorial: {
         } break;
         case Mission::Type::Encounter: {
+            if (m_locationID != data.destinationID)
+                break;
+            if (data.courierTypeID == 0 or data.courierAmount == 0)
+                return true;
+            if (ContainsTypeQty(data.courierTypeID, data.courierAmount))
+                return true;
         } break;
         case Mission::Type::Courier: {
             if (m_locationID == data.destinationID)
@@ -1874,8 +1883,14 @@ bool Client::IsMissionComplete(MissionOffer& data)
                     return true;
         } break;
         case Mission::Type::Trade: {
+            if (m_locationID == data.destinationID)
+                if (ContainsTypeQty(data.courierTypeID, data.courierAmount))
+                    return true;
         } break;
         case Mission::Type::Mining: {
+            if (m_locationID == data.destinationID)
+                if (ContainsTypeQty(data.courierTypeID, data.courierAmount))
+                    return true;
         } break;
         case Mission::Type::Research: {
         } break;
@@ -2245,8 +2260,54 @@ void Client::QueueDestinyEvent(PyTuple** event) {
         return;
     if (sDataMgr.IsStation(m_locationID))
         return;
+    /* _SendQueuedUpdates() clears events without sending while pre-SetState / no ShipSE; mirror AttributeMap. */
+    if (DestinyQueuesCurrentlyDropped()) {
+        EmitDestinyEventImmediate(*event);
+        return;
+    }
     m_destinyEventQueue->AddItem(*event);
     //PyDecRef(*event);
+}
+
+bool Client::DestinyQueuesCurrentlyDropped() const
+{
+    return sDataMgr.IsStation(m_locationID) || pShipSE == nullptr || !m_setStateSent;
+}
+
+void Client::EmitDestinyEventImmediate(PyTuple* singleEvent)
+{
+    if (singleEvent == nullptr)
+        return;
+    if (sDataMgr.IsStation(m_locationID))
+        return;
+
+    Notify_OnMultiEvent nom;
+        nom.events = new PyList();
+        PyIncRef(singleEvent);
+        nom.events->AddItem(singleEvent);
+    PyTuple* wrapped = nom.Encode();
+    SendNotification("OnMultiEvent", "charid", &wrapped, false);
+}
+
+void Client::EmitDestinyUpdateNow(PyTuple** update)
+{
+    if ((update == nullptr) || ((*update) == nullptr))
+        return;
+    if (sDataMgr.IsStation(m_locationID))
+        return;
+
+    DoDestinyAction act;
+        act.stamp = sEntityList.GetStamp();
+        act.update = *update;
+
+    PyList *ul = new PyList();
+        ul->AddItem(act.Encode());
+
+    DoDestinyUpdateMain_2 dum;
+        dum.updates = ul;
+        dum.waitForBubble = DestinyUpdatesWaitForBubble();
+    PyTuple *t = dum.Encode();
+    SendNotification("DoDestinyUpdate", "clientID", &t, false);
 }
 
 void Client::QueueDestinyUpdate(PyTuple **update, bool DoPackage /*false*/, bool IsSetState /*false*/) {

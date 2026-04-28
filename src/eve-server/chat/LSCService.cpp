@@ -27,6 +27,7 @@
 #include "eve-server.h"
 
 #include <boost/algorithm/string.hpp>
+#include <string>
 
 #include "admin/CommandDispatcher.h"
 #include "admin/SlashService.h"
@@ -34,6 +35,17 @@
 #include "fleet/FleetService.h"
 #include "services/ServiceManager.h"
 
+namespace {
+    // Client represents "EVE" / Global with tuple ('global', 0). We cannot use 0 as a map key
+    // in CreateChannel; store the channel as a normal static id and map 0 <-> this id in RPCs.
+    const int32 LSC_EVE_GLOBAL_CHANNEL_ID = 3;
+}
+
+static int32 MapLSCGlobalZero(int32 subId) {
+    if (subId == 0)
+        return LSC_EVE_GLOBAL_CHANNEL_ID;
+    return subId;
+}
 
 /** @todo
  * LSC system todo list...
@@ -290,11 +302,17 @@ PyResult LSCService::JoinChannels(PyCallArgs &call, PyList* channelIDs, PyLong* 
             }
             prt = prt->items[0]->AsTuple();
 
-            if (prt->items.size() != 2 or /* !prt->items[0]->IsString() or unnessecary */ !prt->items[1]->IsInt()) {
+            if (prt->items.size() != 2 or !prt->items[1]->IsInt()) {
                 _log(SERVICE__ERROR, "%s: Failed to decode arguments.", GetName());
                 continue;
             }
-            toJoin.insert(prt->items[1]->AsInt()->value());
+            int32 sub = prt->items[1]->AsInt()->value();
+            {
+                const std::string chName = PyRep::StringContent(prt->items[0]);
+                if (chName == "global")
+                    sub = MapLSCGlobalZero(sub);
+            }
+            toJoin.insert(sub);
         } else {
             codelog(SERVICE__ERROR, "%s: Failed to decode argument ", call.client->GetName());
             return nullptr;
@@ -393,6 +411,10 @@ PyResult LSCService::SendMessage(PyCallArgs& call, PyRep* channelInfo, PyWString
         message = args.message;
         _log(LSC__INFO, "Handle_SendMessage: call is system channel chat.");
     }
+
+    // EVE Global uses id 0 in LSCChannelMultiDesc; our static channel is LSC_EVE_GLOBAL_CHANNEL_ID.
+    if (channel_id == 0)
+        channel_id = LSC_EVE_GLOBAL_CHANNEL_ID;
 
     std::map<int32, LSCChannel*>::iterator itr = m_channels.find(channel_id);
     if (itr == m_channels.end()) {
@@ -697,6 +719,9 @@ PyResult LSCService::LeaveChannel(PyCallArgs &call, PyRep* channelInfo, PyInt* u
         return PyStatic.NewNone();
     }
 
+    if (toLeave == 0u)
+        toLeave = (uint32)LSC_EVE_GLOBAL_CHANNEL_ID;
+
     if (unsubscribe->value())
         m_db.DeleteSubscription(toLeave,call.client->GetCharacterID());
 
@@ -729,12 +754,18 @@ PyResult LSCService::LeaveChannels(PyCallArgs &call, PyList* channels, PyInt* un
     PyList::const_iterator cur = channels->begin();
     for (; cur != channels->end(); cur++) {
         if ((*cur)->IsInt()) {
-            toLeave.insert((*cur)->AsInt()->value());
+            uint32 v = (uint32)(*cur)->AsInt()->value();
+            if (v == 0u)
+                v = (uint32)LSC_EVE_GLOBAL_CHANNEL_ID;
+            toLeave.insert(v);
         } else if ((*cur)->IsTuple()) {
             PyTuple* prt = (*cur)->AsTuple();
 
             if (prt->GetItem(0)->IsInt()) {
-                toLeave.insert(prt->GetItem(0)->AsInt()->value());
+                uint32 v = (uint32)prt->GetItem(0)->AsInt()->value();
+                if (v == 0u)
+                    v = (uint32)LSC_EVE_GLOBAL_CHANNEL_ID;
+                toLeave.insert(v);
                 continue;
             }
 
@@ -752,7 +783,13 @@ PyResult LSCService::LeaveChannels(PyCallArgs &call, PyList* channels, PyInt* un
                 continue;
             }
 
-            toLeave.insert(prt->GetItem(1)->AsInt()->value());
+            {
+                uint32 v = (uint32)prt->GetItem(1)->AsInt()->value();
+                const std::string chName = PyRep::StringContent(prt->GetItem(0));
+                if (chName == "global" && v == 0u)
+                    v = (uint32)LSC_EVE_GLOBAL_CHANNEL_ID;
+                toLeave.insert(v);
+            }
         } else {
             _log(SERVICE__ERROR, "%s: Failed to decode arguments.", GetName());
             continue;
@@ -838,6 +875,9 @@ PyResult LSCService::GetMembers(PyCallArgs &call, PyRep* channelInfo) {
         return nullptr;
     }
 
+    if (channelID == 0u)
+        channelID = (uint32)LSC_EVE_GLOBAL_CHANNEL_ID;
+
     if (m_channels.find(channelID) != m_channels.end())
         return m_channels[channelID]->EncodeChannelChars();
 
@@ -854,6 +894,11 @@ void LSCService::CharacterLogin(Client* pClient)
 {
     CreateSystemChannel(pClient->GetCorporationID());
     CreateSystemChannel(pClient->GetAllianceID());
+    if (sConfig.world.globalChat) {
+        LSCChannel* ch = GetChannelByID(LSC_EVE_GLOBAL_CHANNEL_ID);
+        if (ch != nullptr and !ch->IsJoined(pClient->GetCharacterID()))
+            ch->JoinChannel(pClient);
+    }
 }
 
 void LSCService::SystemUnload(uint32 systemID, uint32 constID, uint32 regionID)
@@ -1005,6 +1050,11 @@ void LSCService::CreateStaticChannels() {
     str << "<color=0xffffffff>There are no third party applications (.exe) that will magically give you any type of ship you wish or hack your wallet. Please report characters advertising these types of links IMMEDIATELY via petition and DO NOT download and try them. <br><br>";
     // str << "Sister of EVE storyline starts in <url=showinfo:5//30005001><u>Arnon</url></b></u> <b>with <url=showinfo:1378//3019356><u>Sister Alitura</url></b></u>. <br><br></color>";
     CreateChannel(1, 1, "Rookie Help", str.str().c_str(), nullptr, "help", LSC::Type::normal, cspa, 263238, -1, true);
+    // "EVE" / Global: client uses channel tuple ('global',0); LSC decodes 0 to this static id in Join/Leave/Send.
+    str.str("");
+    str << "<br><color=0xff00ff00><b>EVE / Global</b></color> — public chat for everyone on this server (EVEmu).<br><br>";
+    str << "Keep the same civility you would use in the other public channels.</color><br><br>";
+    CreateChannel(LSC_EVE_GLOBAL_CHANNEL_ID, 1, "EVE", str.str().c_str(), nullptr, "eve", LSC::Type::global, cspa, 263240, -1, true);
 // Incursion Help MOTD
     str.str("");
     str << "<br><color=0xff007fff><b>Welcome to the EVEmu <u>EVE Online: Crucible</u> Emulator</color><br><br>";

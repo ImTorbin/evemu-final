@@ -59,10 +59,12 @@ protected:
     void ScanStart();
     void SurveyScan();
 
+    /** Always use this instead of caching: system can unload or client can jump while Scan exists. */
+    SystemManager* ClientSystem() const;
+
 private:
     ManagerDB* m_db;
     Client* m_client;
-    SystemManager* m_system;
 
     void CalcProbeAngles(GPoint& sigPos, std::vector<ProbeSE*>& probeVec, std::map<float, std::pair<ProbeSE*, ProbeSE*>>& angleMap);
 

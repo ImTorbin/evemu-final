@@ -81,14 +81,23 @@ int32 GetElapsedHours(int64 time)  // -allan
     return (int32)hours;
 }
 
+int64 GetFileTimeNowInt64()
+{
+    double ms_d = GetTimeMSeconds();
+    if (ms_d < 0.0)
+        ms_d = 0.0;
+    const int64 ms = static_cast<int64>(ms_d);
+    const int64 sec_whole = ms / INT64_C(1000);
+    const int64 frac_ms = ms % INT64_C(1000);
+    const uint32 nsec = static_cast<uint32>(frac_ms * INT64_C(1000000));
+    return UnixTimeToWin32Time(static_cast<time_t>(sec_whole), nsec);
+}
+
 double GetFileTimeNow()  // -allan
 {
-    // convert system time to filetime.
-    double time = GetTimeMSeconds();
-    time /= 1000;   // to second
-    time += SECS_BETWEEN_EPOCHS;    // offset
-    time *= EvE::Time::Second; // to 100 uSeconds
-    return time;
+    /* Keep double API for legacy call sites; wire formats that declare <long> timestamps should use
+       GetFileTimeNowInt64() so the client unmarshals exact integers (float breaks godma time deltas). */
+    return static_cast<double>(GetFileTimeNowInt64());
 }
 
 /**

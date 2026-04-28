@@ -8,10 +8,13 @@
 
 #include "eve-server.h"
 
+#include <algorithm>
+
 #include "StatisticMgr.h"
 #include "exploration/Probes.h"
 #include "exploration/Scan.h"
 #include "inventory/AttributeEnum.h"
+#include "system/SystemEntity.h"
 #include "ship/Missile.h"
 #include "ship/modules/ActiveModule.h"
 #include "ship/modules/ModuleItem.h"
@@ -646,8 +649,12 @@ uint32 ActiveModule::DoCycle() {
             m_repeat = 1;
         } break;
         // i *think* these first 2 go here....need testing
-        case EVEDB::invGroups::Energy_Vampire:
-        case EVEDB::invGroups::Energy_Destabilizer:
+        case EVEDB::invGroups::Energy_Vampire: {
+            ApplyEnergyVampireDrain();
+        } break;
+        case EVEDB::invGroups::Energy_Destabilizer: {
+            ApplyEnergyNeutralizerDrain();
+        } break;
         case EVEDB::invGroups::Energy_Transfer_Array: {
             if (m_targetSE != nullptr)
                 UpdateCharge(AttrCapacitorCharge, AttrCapacitorCapacity, AttrPowerTransferAmount, m_targetSE->GetSelf());
@@ -825,8 +832,12 @@ void ActiveModule::DeactivateCycle(bool abort/*false*/)
             if (m_bubble->IsBelt()) {
                 float m_range = GetAttribute(AttrSurveyScanRange).get_float();
                 float distance = 0;
+                ShipSE* scannerShip = m_shipRef->GetPilot()->GetShipSE();
                 for (auto pASE : vList) {
-                    distance = m_shipRef->position().distance(pASE->GetPosition());
+                    if (scannerShip != nullptr)
+                        distance = static_cast<float>(scannerShip->GetAuthPosition().distance(pASE->GetAuthPosition()));
+                    else
+                        distance = static_cast<float>(m_shipRef->position().distance(pASE->GetPosition()));
                     distance -= pASE->GetRadius();
                     distance -= m_shipRef->radius(); // do we need this one here?
                     if (distance < m_range) {
@@ -1074,6 +1085,88 @@ void ActiveModule::ApplyEffect(int8 state, bool active/*false*/)
     sFxProc.ApplyEffects(m_modRef.get(), pPilot->GetChar().get(), m_shipRef.get(), true);
 }
 
+
+
+namespace {
+
+/** Rats omitted from SDE can have capCapacity=0; refresh to a plausible bank once so nos/neut can resolve. */
+void EnsureSynthNpcCapBankForSap(SystemEntity* se, InventoryItemRef item, float cycleHint)
+{
+    if (se == nullptr || item.get() == nullptr || !se->IsNPCSE())
+        return;
+
+    float capMax = item->GetAttribute(AttrCapacitorCapacity).get_float();
+    if (capMax >= 1.f)
+        return;
+
+    float bank(std::max(std::max(cycleHint * 250.f, 4000.f), 1.f));
+    bank = std::min(bank, 2.0e6f);
+    const EvilNumber ev(bank);
+    item->SetAttribute(AttrCapacitorCapacity, ev, false);
+    item->SetAttribute(AttrCapacitorCharge, ev, false);
+}
+
+} // namespace
+
+void ActiveModule::ApplyEnergyVampireDrain()
+{
+    if (m_targetSE == nullptr)
+        return;
+    InventoryItemRef tgtRef(m_targetSE->GetSelf());
+    if (!tgtRef)
+        return;
+
+    float xfer = GetAttribute(AttrPowerTransferAmount).get_float();
+    if (xfer < 0.001f)
+        return;
+
+    EnsureSynthNpcCapBankForSap(m_targetSE, tgtRef, xfer);
+
+    const float tgtCharge = tgtRef->GetAttribute(AttrCapacitorCharge).get_float();
+    const float tgtCap = tgtRef->GetAttribute(AttrCapacitorCapacity).get_float();
+    if (tgtCap < 0.001f)
+        return;
+
+    const float drain(std::min(xfer, tgtCharge));
+    const float tgtNew(std::max(0.f, tgtCharge - drain));
+    tgtRef->SetAttribute(AttrCapacitorCharge, EvilNumber(tgtNew));
+
+    const float shipCharge = m_shipRef->GetAttribute(AttrCapacitorCharge).get_float();
+    const float shipCapMax = m_shipRef->GetAttribute(AttrCapacitorCapacity).get_float();
+    if (shipCapMax < 0.001f)
+        return;
+
+    float recv(drain);
+    if (shipCharge + recv > shipCapMax)
+        recv = std::max(0.f, shipCapMax - shipCharge);
+
+    float pct((shipCharge + recv) / shipCapMax);
+    if (pct > 1.f)
+        pct = 1.f;
+    if (pct < 0.f)
+        pct = 0.f;
+    m_shipRef->SetShipCapacitorLevel(pct);
+}
+
+void ActiveModule::ApplyEnergyNeutralizerDrain()
+{
+    if (m_targetSE == nullptr)
+        return;
+    InventoryItemRef tgtRef(m_targetSE->GetSelf());
+    if (!tgtRef)
+        return;
+
+    float amt = GetAttribute(AttrEnergyDestabilizationAmount).get_float();
+    if (amt < 0.001f)
+        return;
+
+    EnsureSynthNpcCapBankForSap(m_targetSE, tgtRef, amt);
+
+    const float tgtCharge = tgtRef->GetAttribute(AttrCapacitorCharge).get_float();
+    const float tgtNew(std::max(0.f, tgtCharge - amt));
+    tgtRef->SetAttribute(AttrCapacitorCharge, EvilNumber(tgtNew));
+}
+
 void ActiveModule::UpdateCharge(uint16 attrID, uint16 testAttrID, uint16 srcAttrID, InventoryItemRef iRef)
 {
     // Apply boost amount:
@@ -1275,7 +1368,13 @@ bool ActiveModule::CanActivate() {
             } break;
         }
 
-        float distance = m_shipRef->position().distance(m_targetSE->GetPosition());
+        float distance;
+        Client* pilot = m_shipRef->GetPilot();
+        ShipSE* shipSE = (pilot != nullptr ? pilot->GetShipSE() : nullptr);
+        if (shipSE != nullptr)
+            distance = static_cast<float>(shipSE->GetAuthPosition().distance(m_targetSE->GetAuthPosition()));
+        else
+            distance = static_cast<float>(m_shipRef->position().distance(m_targetSE->GetAuthPosition()));
         distance -= m_targetSE->GetRadius();
 
         _log(MODULE__MESSAGE, "Activate::RangeTest - distance between %s and target %s: %.1f.  range of %s is %.1f", \
@@ -1502,15 +1601,6 @@ void ActiveModule::LaunchMissile()
         AbortCycle();
         return;
     }
-    ItemData idata(m_chargeRef->typeID(), pClient->GetCharacterID(), pClient->GetLocationID(), flagMissile, m_chargeRef->name(), m_shipRef->position() );
-    InventoryItemRef missileRef = sItemFactory.SpawnItem(idata);
-    if (missileRef.get() == nullptr) {
-        _log(ITEM__ERROR ,"Unable to spawn item #%u:'%s' of type %u.", m_chargeRef->itemID(), m_chargeRef->name(), m_chargeRef->typeID());
-        pClient->SendErrorMsg("Your %s in %s experienced a loading error and was disabled.", m_chargeRef->name(), m_modRef->name());
-        AbortCycle();
-        return;
-    }
-
     SystemManager* pSystem = pClient->SystemMgr();
     if (pSystem == nullptr) {
         AbortCycle();
@@ -1521,6 +1611,16 @@ void ActiveModule::LaunchMissile()
         AbortCycle();
         return;
     }
+    const GPoint launchPos(pShipSE->GetAuthPosition());
+    ItemData idata(m_chargeRef->typeID(), pClient->GetCharacterID(), pClient->GetLocationID(), flagMissile, m_chargeRef->name(), launchPos );
+    InventoryItemRef missileRef = sItemFactory.SpawnItem(idata);
+    if (missileRef.get() == nullptr) {
+        _log(ITEM__ERROR ,"Unable to spawn item #%u:'%s' of type %u.", m_chargeRef->itemID(), m_chargeRef->name(), m_chargeRef->typeID());
+        pClient->SendErrorMsg("Your %s in %s experienced a loading error and was disabled.", m_chargeRef->name(), m_modRef->name());
+        AbortCycle();
+        return;
+    }
+
     Missile* pMissile = new Missile(missileRef, pSystem->GetServiceMgr(), pSystem, m_modRef, m_targetSE, pShipSE, this);
     if (pMissile == nullptr) {
         _log(ITEM__ERROR ,"Unable to create SE #%u:'%s' of type %u.", m_chargeRef->itemID(), m_chargeRef->name(), m_chargeRef->typeID());
@@ -1529,7 +1629,7 @@ void ActiveModule::LaunchMissile()
         return;
     }
 
-    float distance = pMissile->GetSelf()->position().distance(m_targetSE->GetPosition());
+    float distance = static_cast<float>(launchPos.distance(m_targetSE->GetAuthPosition()));
     float missileSpeed = pMissile->GetSelf()->GetAttribute(AttrMaxVelocity).get_float();
     if (missileSpeed < 0.1f)
         missileSpeed = 0.1f;

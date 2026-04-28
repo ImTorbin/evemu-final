@@ -17,6 +17,7 @@ RUN apt-get update && \
     g++ \
     gdb \
     libutfcpp-dev \
+    libcurl4-openssl-dev \
     mariadb-client \
     passwd \
     && apt-get clean && rm -rf /var/lib/apt/lists/*

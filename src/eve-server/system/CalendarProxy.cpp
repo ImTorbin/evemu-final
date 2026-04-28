@@ -38,33 +38,26 @@ CalendarProxy::CalendarProxy() :
 
 PyResult CalendarProxy::GetEventList(PyCallArgs& call, PyInt* month, PyInt* year)
 {
-    PyList *list = new PyList();
-    PyRep* res(nullptr);
+    // Client expects a single flat list of util.KeyVal event rows, not nested lists per scope.
+    PyList* list = new PyList();
+    const uint32 m = month->value();
+    const uint32 y = year->value();
 
-    // get system events
-    res = CalendarDB::GetEventList(ownerSystem, month->value(), year->value());
-    if (res != nullptr)
-        list->AddItem(res);
+    auto appendChunk = [&](PyRep* chunk) {
+        if (chunk == nullptr)
+            return;
+        PyList* src = chunk->AsList();
+        for (PyRep* item : src->items)
+            list->AddItem(item->Clone());
+        src->clear();
+        PyDecRef(chunk);
+    };
 
-    // get personal events
-    res = CalendarDB::GetEventList(call.client->GetCharacterID(), month->value(), year->value());
-    if (res != nullptr)
-        list->AddItem(res);
-
-    // get corp events
-    res = CalendarDB::GetEventList(call.client->GetCorporationID(), month->value(), year->value());
-    if (res != nullptr)
-        list->AddItem(res);
-
-    // get alliance events
-    if (IsAlliance(call.client->GetAllianceID())) {
-        res = CalendarDB::GetEventList(call.client->GetAllianceID(), month->value(), year->value());
-        if (res != nullptr)
-            list->AddItem(res);
-    }
-
-    if (list->empty())
-        list->AddItem(PyStatic.NewNone());
+    appendChunk(CalendarDB::GetEventList(ownerSystem, m, y));
+    appendChunk(CalendarDB::GetEventList(call.client->GetCharacterID(), m, y));
+    appendChunk(CalendarDB::GetEventList(call.client->GetCorporationID(), m, y));
+    if (IsAlliance(call.client->GetAllianceID()))
+        appendChunk(CalendarDB::GetEventList(call.client->GetAllianceID(), m, y));
 
     return list;
 }

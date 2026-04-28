@@ -33,7 +33,13 @@ void JumpBridgeSE::Init()
 void JumpBridgeSE::InitData()
 {
     StructureSE::InitData();
-    m_moonSE = m_system->GetClosestMoonSE(GetPosition())->GetMoonSE();
+    SystemEntity* pMoon = m_system->GetClosestMoonSE(GetPosition());
+    if (pMoon == nullptr or !pMoon->IsMoonSE()) {
+        _log(POS__ERROR, "JumpBridgeSE::InitData - no moon in system %u for %s(%u).",
+             m_system->GetID(), GetName(), GetID());
+        return;
+    }
+    m_moonSE = pMoon->GetMoonSE();
     m_data.anchorpointID = m_moonSE->GetID();
 
     m_bridgeData.itemID = m_data.itemID;

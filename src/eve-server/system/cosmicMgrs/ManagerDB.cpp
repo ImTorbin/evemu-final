@@ -146,9 +146,10 @@ PyObjectEx* ManagerDB::GetAgents() {
         "    agt.level,"
         "    agt.quality,"
         "    agt.corporationID,"
-        "    chr.stationID,"
+        "    COALESCE(NULLIF(chr.stationID,0),agt.locationID) AS stationID,"
         "    chr.gender,"
-        "    bl.bloodlineID"
+        "    bl.bloodlineID,"
+        "    COALESCE(chr.excludedFromAgentSearch, 0) AS excludedFromAgentSearch"
         " FROM agtAgents AS agt"
         " LEFT JOIN chrNPCCharacters AS chr ON chr.characterID = agt.agentID"
         " LEFT JOIN bloodlineTypes AS bl ON bl.typeID = chr.typeID"
@@ -341,6 +342,15 @@ void ManagerDB::SaveAnomaly(CosmicSignature& sig)
             sig.scanGroupID, sig.scanAttributeID, sig.position.x, sig.position.y, sig.position.z )) {
         _log(DATABASE__ERROR, "SaveAnomaly - unable to save dungeon");
         }
+}
+
+void ManagerDB::DeleteSignatureBySigItemID(uint32 sigItemID)
+{
+    if (sigItemID == 0)
+        return;
+    DBerror err;
+    if (!sDatabase.RunQuery(err, "DELETE FROM sysSignatures WHERE sigItemID = %u", sigItemID))
+        _log(DATABASE__ERROR, "DeleteSignatureBySigItemID(%u): %s", sigItemID, err.c_str());
 }
 
 void ManagerDB::GetAnomalyList(DBQueryResult& res)

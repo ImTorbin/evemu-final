@@ -40,7 +40,7 @@ void AgentDB::LoadAgentData(uint32 agentID, AgentData& data)
         "   chr.characterName " //15
         " FROM agtAgents AS agt"
         " LEFT JOIN chrNPCCharacters AS chr ON chr.characterID = agt.agentID"
-        " LEFT JOIN crpNPCCorporations AS crp ON crp.corporationID = agt.corporationID"
+        " LEFT JOIN crpNPCCorporations AS crp ON crp.corporationID = COALESCE(NULLIF(chr.corporationID, 0), agt.corporationID)"
         " LEFT JOIN bloodlineTypes AS bl ON bl.typeID = chr.typeID"
         " LEFT JOIN mapDenormalize AS itm ON itm.itemID = agt.locationID"
         " WHERE agt.agentID = %u", agentID))
@@ -74,6 +74,17 @@ void AgentDB::LoadAgentData(uint32 agentID, AgentData& data)
         data.raceID         = sDataMgr.GetFactionRace(data.factionID);
         data.name           = row.GetText(15);
         data.research       = (data.typeID == Agents::Type::Research);
+
+        // chrNPCCharacters.solarSystemID is often left unset; client UI (location header) needs a valid system id
+        if (data.solarSystemID == 0 and data.locationID != 0) {
+            if (IsStationID(data.locationID)) {
+                const uint32 sys = sDataMgr.GetStationSystem(data.locationID);
+                if (sys != 0)
+                    data.solarSystemID = sys;
+            } else if (IsSolarSystemID(data.locationID)) {
+                data.solarSystemID = data.locationID;
+            }
+        }
     }
 }
 

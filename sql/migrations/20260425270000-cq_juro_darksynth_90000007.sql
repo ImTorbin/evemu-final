@@ -16,7 +16,7 @@ WHERE characterID = @agent;
 INSERT INTO agtAgents (agentID, agentTypeID, divisionID, `level`, `quality`, corporationID, locationID, isLocator)
 VALUES (
     @agent,
-    1,
+    2,
     2,
     1,
     0,

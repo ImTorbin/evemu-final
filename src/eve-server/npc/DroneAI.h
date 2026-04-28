@@ -69,6 +69,8 @@ protected:
     void ClearTarget(SystemEntity* pTarget);
     void AttackTarget(SystemEntity* pTarget);
     void CheckDistance(SystemEntity* pTarget);
+    /** Orbit / follow stand-off with per-drone spread so packs do not share one ring. */
+    uint32 PackedOrbitDistance(double baseMeters) const;
 
     int8 m_state;
     std::string GetStateName(int8 stateID);

@@ -178,6 +178,10 @@ public:
     // gets taxrate, allyID, warID of corpID
     static void GetCorpData(CorpData& data);
 
+    /** chrKillTable: corp row when ShipSE/session fields are 0 (NPCs, drones). */
+    static uint32 GetCorporationWarFactionID(uint32 corpID);
+    static uint32 GetCorporationAllianceID(uint32 corpID);
+
     static void UpdateCorpHQ(uint32 corpID, uint32 stationID);
     static void GetMemberIDs(uint32 corpID, std::vector<uint32>& ids, bool online=true);
 

@@ -121,15 +121,19 @@ void Concord::EncodeDestiny( Buffer& into ) const
 {
     using namespace Destiny;
 
-    uint8 mode = m_destiny->GetState(); //Ball::Mode::STOP;
+    uint8 mode = m_destiny->GetState();
+    if (mode != Ball::Mode::WARP && mode != Ball::Mode::FOLLOW && mode != Ball::Mode::ORBIT
+            && mode != Ball::Mode::GOTO && mode != Ball::Mode::STOP)
+        mode = Ball::Mode::STOP;
 
+    const GPoint bh(m_destiny != nullptr ? m_destiny->GetPosition() : GetPosition());
     BallHeader head = BallHeader();
         head.entityID = GetID();
         head.mode = mode;
         head.radius = GetRadius();
-        head.posX = x();
-        head.posY = y();
-        head.posZ = z();
+        head.posX = bh.x;
+        head.posY = bh.y;
+        head.posZ = bh.z;
         head.flags = Ball::Flag::IsMassive | Ball::Flag::IsFree;
     into.Append( head );
     MassSector mass = MassSector();
@@ -156,10 +160,9 @@ void Concord::EncodeDestiny( Buffer& into ) const
                 warp.targY = target.y;
                 warp.targZ = target.z;
                 warp.speed = m_destiny->GetWarpSpeed();       //ship warp speed x10  (dont ask...this is what it is...more dumb ccp shit)
-                // warp timing.  see Ship::EncodeDestiny() for notes/updates
-                warp.effectStamp = -1; //m_destiny->GetStateStamp();   //timestamp when warp started
-                warp.followRange = 0;   //this isnt right
-                warp.followID = 0;  //this isnt right
+                warp.effectStamp = static_cast<int32>(m_destiny->GetStateStamp());
+                warp.followRange = WARP_SNAPSHOT_FOLLOW_RANGE;
+                warp.followID = WARP_SNAPSHOT_FOLLOW_ID;
             into.Append( warp );
         }  break;
         case Ball::Mode::FOLLOW: {
@@ -199,7 +202,7 @@ void Concord::EncodeDestiny( Buffer& into ) const
 void Concord::MakeDamageState(DoDestinyDamageState &into) const {
     into.shield = m_shieldCharge / m_self->GetAttribute(AttrShieldCapacity).get_float();
     into.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_float() + 8;
-    into.timestamp = GetFileTimeNow();
+    into.timestamp = GetFileTimeNowInt64();
     into.armor = 1.0 - (m_armorDamage / m_self->GetAttribute(AttrArmorHP).get_float());
     into.structure = 1.0 - (m_hullDamage / m_self->GetAttribute(AttrHP).get_float());
 }
@@ -236,7 +239,7 @@ void Concord::_UpdateDamage()
      DamageDetails dmgState;
         dmgState.shield = m_self->GetAttribute(AttrShieldCharge).get_float() / m_self->GetAttribute(AttrShieldCapacity).get_float();
         dmgState.recharge = m_self->GetAttribute(AttrShieldRechargeRate).get_float();
-        dmgState.timestamp = GetFileTimeNow();
+        dmgState.timestamp = GetFileTimeNowInt64();
         dmgState.armor = 1.0 - m_self->GetAttribute(AttrArmorDamage).get_float() / m_self->GetAttribute(AttrArmorHP).get_float();
         dmgState.structure = 1.0 - m_self->GetAttribute(AttrDamage).get_float() / m_self->GetAttribute(AttrHP).get_float();
      OnDamageStateChange dmgChange;
@@ -471,7 +474,7 @@ void ConcordAI::SetSignaling(SystemEntity* pTarget) {
 void ConcordAI::CheckDistance(SystemEntity* pSE)
 {
     //rewrote distance checks for correct logic this time
-    GVector usToThem(m_npc->GetPosition(), pSE->GetPosition());
+    GVector usToThem(m_npc->GetAuthPosition(), pSE->GetAuthPosition());
     //double dist = m_npc->GetPosition().distance(pSE->GetPosition());     // this throws occasional errors (segfault)
     double dist = usToThem.length();
     if (dist > m_entityAttackRange) {
@@ -594,7 +597,7 @@ void ConcordAI::Attack(SystemEntity* pSE)
     if (m_mainAttackTimer.Check()) {
         if (!pSE) return;
         // Check to see if the target still in the bubble (Client warped out)
-        if (!m_npc->SysBubble()->InBubble(pSE->GetPosition())) {
+        if (!m_npc->SysBubble()->InBubble(pSE->GetAuthPosition())) {
             _log(CONCORD__AI_TRACE, "%s(%u): Target %s(%u) no longer in bubble.  Clear target and move on",
                  m_npc->GetName(), m_npc->GetID(), pSE->GetName(), pSE->GetID());
 

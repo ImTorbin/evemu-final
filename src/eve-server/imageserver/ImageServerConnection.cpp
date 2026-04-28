@@ -102,12 +102,11 @@ void ImageServerConnection::ProcessHeaders()
 
     _imageData = sImageServer.GetImage(_category, _id, _size);
     if (!_imageData) {
+        /* Player-owned dynamic items must exist locally; everything else (Character, Corp, Alliance,
+         * InventoryType, etc.) can fall back to CCP's CDN so killmail / show-info portraits and type
+         * icons load without mirroring the full image tree. */
         if (IsPlayerItem(_id)) {
             sLog.Error("     Image Server","Image for itemID %u not found.", _id);
-            NotFound();
-            return;
-        } else if (IsCharacterID(_id)) {
-            sLog.Error("     Image Server","Image for charID %u not found.", _id);
             NotFound();
             return;
         }
@@ -136,7 +135,6 @@ void ImageServerConnection::Redirect()
 
 void ImageServerConnection::RedirectLocation()
 {
-    sLog.Error("     Image Server"," RedirectLocation() called.");
     std::string extension = _category == "Character" ? "jpg" : "png";
     std::stringstream url;
     url << ImageServer::FallbackURL << _category << "/" << _id << "_" << _size << "." << extension;

@@ -42,6 +42,7 @@
  */
 class Client;
 class GenericModule;
+class DroneSE;
 
 class ShipItem
 : public InventoryItem
@@ -194,6 +195,9 @@ public:
     void SetShipArmor(float fraction);
     void SetShipHull(float fraction);
     void SetShipCapacitorLevel(float fraction);
+    /** Keep capacitor/shield recharge time attrs (>0 ms) so Crucible godma.GetChargeValue never divides by tau at 0. */
+    void SanitizeSimulatorRechargeAttributes();
+
     float GetShipHullHP()                               { return GetAttribute(AttrHP).get_float(); }
     float GetShipArmorHP()                              { return GetAttribute(AttrArmorHP).get_float(); }
     float GetShipPGLevel()                              { return GetAttribute(AttrPowerOutput).get_float(); }
@@ -363,11 +367,14 @@ public:
 
     ShipItemRef GetShipItemRef()                        { return m_shipRef; }
 
-    float CalculateRechargeRate(float Capacity, float RechargeTimeMS, float Current);
+    /** Passive shield/cap regen derivative (Hp or GJ per second share same ODE shape). Params: Capacity, Current, RechargeTimeMS (dogma ms). */
+    float CalculateRechargeRate(float Capacity, float Current, float RechargeTimeMS);
 
     void AbandonDrones();
     bool LaunchDrone(InventoryItemRef dRef);
     void ScoopDrone(SystemEntity* pSE);
+    /** Remove a launched drone from tracking and bandwidth (e.g. left behind when parent warps). */
+    void ReleaseLaunchedDrone(DroneSE* pDrone);
     // returns current count of drones in space for this ship
     uint8 DroneCount()                                  { return m_drones.size(); }
 

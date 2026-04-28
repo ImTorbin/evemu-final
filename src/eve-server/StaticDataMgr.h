@@ -50,7 +50,16 @@ public:
 
     void                GetCategory(uint8 catID, Inv::CatData &into);
     void                GetGroup(uint16 grpID, Inv::GrpData &into);
-    void                GetType(uint16 typeID, Inv::TypeData &into);
+    void                GetType(uint16 typeID, Inv::TypeData &into) const;
+    /** @return true if typeID exists in loaded invTypes (GetType would populate `into`). */
+    bool                HasType(uint16 typeID) const;
+    /** @return true if grpID exists in loaded invGroups (GetGroup would populate `into`). */
+    bool                HasGroup(uint16 grpID) const;
+    /** For loot Discord etc.: max(invTypes.metaLevel, dgmTypeAttributes AttrMetaLevel 633 for type). */
+    uint8               ResolveTypeMetaLevel(uint16 typeID) const;
+    uint8               ResolveTypeMetaLevel(uint16 typeID, const Inv::TypeData& typeRowForSameID) const;
+    /** Random published invTypes row in group (0 if none). For anomaly/Entity NPC picks. */
+    uint16              GetRandomPublishedTypeInGroup(uint16 groupID) const;
     void                GetTypes(std::map<uint16, Inv::TypeData> &into);
     const char*         GetAttrName(uint16 attrID);
     const char*         GetTypeName(uint16 typeID);     // not sure if this will be needed
@@ -75,6 +84,10 @@ public:
     uint16              GetRandRatType(uint8 sClass, uint16 groupID);
     uint32              GetWreckID(uint32 typeID);  // returns wreck typeID based on given shipTypeID (incomplete, most ships done.)
     void                GetLoot(uint32 groupID, std::vector<LootList>& lootList);
+    /** Extra wreck drops for faction commander NPCs (anomaly commander wave, belt commanders, etc.) — modules + ship BPCs. */
+    void                BuildAnomalyCommanderBonusLoot(uint32 factionID, std::vector<LootList>& out) const;
+    /** True if invTypes name is a faction commander (e.g. Dark Blood / Dread Guristas); sets factionID for BuildAnomalyCommanderBonusLoot. */
+    bool                GetFactionCommanderBonusLootFaction(uint16 typeID, uint32& factionID) const;
 
     bool                IsRefinable(uint16 typeID);
     bool                IsRecyclable(uint16 typeID);
@@ -127,6 +140,9 @@ public:
     uint32              GetFactionCorp(uint32 factionID);
     uint32              GetCorpFaction(uint32 corpID);
     uint32              GetRaceFaction(uint8 raceID);
+    /** When invTypes.race does not match the pirate empire (e.g. Sansha hull with Amarr race), infer faction from name/group. */
+    static constexpr uint32 InferNpcRatFactionNoMatch = 0xFFFFFFFFu;
+    uint32              InferNpcRatFactionForShipType(uint16 typeID) const;
     uint8               GetFactionRace(uint32 factionID);
     std::string         GetCorpName(uint32 corpID);
     std::string         GetFactionName(uint32 factionID);
@@ -160,6 +176,8 @@ public:
     // ---marketbot changes
     bool GetStationListForSystem(uint32 systemID, std::vector<uint32>& stations) const;
     void GetRandomSystemIDs(size_t count, std::vector<uint32>& outSystems) const;
+    /** Like GetRandomSystemIDs but only systems with at least one station (market orders need a station). */
+    void GetRandomSystemIDsWithStations(size_t count, std::vector<uint32>& outSystems) const;
     // ---
 protected:
     void                Populate();

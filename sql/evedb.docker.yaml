@@ -1,0 +1,10 @@
+# For running evedbtool from a compose container (use db hostname, not 127.0.0.1)
+base-dir: /src/sql/base
+db-database: evemu
+db-host: db
+db-pass: evemu
+db-port: "3306"
+db-user: evemu
+log-level: Info
+migrations-dir: /src/sql/migrations
+dungeon-dir: /src/sql/dungeons

@@ -192,10 +192,44 @@ namespace Dungeon {
         GPoint position;
         std::vector<uint32> items;
     };
+    /** Parsed from dunDungeons.dungeonName for cosmic anomaly wave scripts (faction comes from templateFactionID). */
+    namespace AnomalySiteKind {
+        enum : uint8 {
+            Unknown     = 0,
+            Hideaway,
+            Refuge,
+            Burrow,
+            Den,
+            Yard,
+            RallyPoint,
+            Port,
+            Hub,
+            Haven,
+            Sanctum
+        };
+    }
+
     struct LiveDungeon {
         uint32 systemID;
         uint32 anomalyID;
+        /** Dungeon::Type — source site category for escalation rules */
+        uint8 dungeonType;
+        uint32 ownerID;
+        /** Set after one escalation is spawned from this site (anomaly / unrated). */
+        bool escalationDone;
         std::map<uint16, LiveRoom> rooms;
+
+        /** Cosmic anomaly (Type::Anomaly): multi-wave rats from invGroups asteroid pirates; otherwise unused. */
+        bool anomalyWaveMode;
+        uint32 templateFactionID;
+        /** Dungeon::AnomalySiteKind — wave composition template from dungeon name. */
+        uint8 anomalySiteKind;
+        GPoint combatAnchor;
+        uint8 anomalyRegularWaveCount;
+        /** After wave N is fully cleared, spawn wave N+1; first wave is spawned at site creation with next = 2. */
+        uint8 anomalyNextWaveToSpawn;
+        bool anomalyWantCommander;
+        bool anomalyCommanderSpawned;
     };
 }
 

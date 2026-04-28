@@ -497,8 +497,9 @@ std::vector<uint32> MarketBotMgr::GetSprinkleSystems() {
     const uint32 count = sMBotConf.buy.SprinkleSystemsCount;
     if (count == 0)
         return systemIDs;
-    sDataMgr.GetRandomSystemIDs(count, systemIDs);
-    codelog(MARKET__TRACE, "GetSprinkleSystems(): %zu random systems", systemIDs.size());
+    // Sprinkle orders need a station; random k-space includes WH (31xxxxxx) and empty systems.
+    sDataMgr.GetRandomSystemIDsWithStations(count, systemIDs);
+    codelog(MARKET__TRACE, "GetSprinkleSystems(): %zu systems with stations", systemIDs.size());
     return systemIDs;
 }
 

@@ -136,7 +136,7 @@ bool CynoModule::CanActivate()
     if (pShipSE->SysBubble()->HasTower()) {
         TowerSE* ptSE = pShipSE->SysBubble()->GetTowerSE();
         if (ptSE->HasForceField())
-            if (pShipSE->GetPosition().distance(ptSE->GetPosition()) < ptSE->GetSOI())
+            if (pShipSE->GetAuthPosition().distance(ptSE->GetAuthPosition()) < ptSE->GetSOI())
                 throw UserError("NoCynoInPOSShields");
     }
 

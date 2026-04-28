@@ -11,13 +11,14 @@
 
 #include "missions/MissionDB.h"
 #include "database/EVEDBUtils.h"
+#include <sstream>
 
 
 void MissionDB::LoadMissionData(DBQueryResult& res)
 {
     if (!sDatabase.RunQuery(res,
         "SELECT id, briefingID, name, level, typeID, important, storyline, raceID, constellationID, corporationID, dungeonID,"
-        " rewardISK, rewardItemID, rewardISK, rewardItemQty, bonusISK, bonusTime FROM agtMissions WHERE briefingID > 0 AND rewardISK > 0"))
+        " rewardISK, rewardItemID, rewardItemQty, bonusISK, bonusTime FROM agtMissions WHERE briefingID > 0 AND rewardISK > 0"))
         codelog(DATABASE__ERROR, "Error in LoadMissionData query: %s", res.error.c_str());
 }
 
@@ -25,9 +26,51 @@ void MissionDB::LoadCourierData(DBQueryResult& res)
 {
     if (!sDatabase.RunQuery(res,
         "SELECT q.id, q.briefingID, q.name, q.level, q.typeID, q.important, q.storyline, q.itemTypeID, q.itemQty, it.volume, q.rewardISK, q.rewardItemID,"
-        " q.rewardItemQty, q.bonusISK, q.bonusTime, q.sysRange, q.raceID"
-        " FROM qstCourier AS q LEFT JOIN invTypes AS it ON it.typeID = itemTypeID WHERE briefingID > 0 AND itemTypeID > 0 AND rewardISK > 0"))
+        " q.rewardItemQty, q.bonusISK, q.bonusTime, q.sysRange, q.raceID, q.chainIndex, q.agentID"
+        " FROM qstCourier AS q LEFT JOIN invTypes AS it ON it.typeID = itemTypeID WHERE briefingID > 0 AND itemTypeID > 0"
+        " AND (q.rewardISK > 0 OR q.rewardItemID > 0 OR q.bonusISK > 0 OR q.bonusTime > 0 OR q.chainIndex > 0)"))
         codelog(DATABASE__ERROR, "Error in LoadCourierData query: %s", res.error.c_str());
+}
+
+uint32 MissionDB::CountCompletedOffersForAgent(uint32 characterID, uint32 agentID)
+{
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT COUNT(*) FROM agtOffers WHERE characterID = %u AND agentID = %u AND stateID = %u",
+        characterID, agentID, (unsigned)Mission::State::Completed))
+    {
+        codelog(DATABASE__ERROR, "Error in CountCompletedOffersForAgent: %s", res.error.c_str());
+        return 0;
+    }
+    DBResultRow row;
+    if (res.GetRow(row))
+        return row.GetUInt(0);
+    return 0;
+}
+
+uint32 MissionDB::CountCompletedChainOffersForAgent(uint32 characterID, uint32 agentID, const std::vector<uint16_t>& chainMissionIDs)
+{
+    if (chainMissionIDs.empty())
+        return 0;
+    std::ostringstream in;
+    for (size_t i = 0; i < chainMissionIDs.size(); ++i) {
+        if (i)
+            in << ',';
+        in << static_cast<unsigned>(chainMissionIDs[i]);
+    }
+    const std::string inStr = in.str();
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT COUNT(*) FROM agtOffers WHERE characterID = %u AND agentID = %u AND stateID = %u AND missionID IN (%s)",
+        characterID, agentID, (unsigned)Mission::State::Completed, inStr.c_str()))
+    {
+        codelog(DATABASE__ERROR, "Error in CountCompletedChainOffersForAgent: %s", res.error.c_str());
+        return 0;
+    }
+    DBResultRow row;
+    if (res.GetRow(row))
+        return row.GetUInt(0);
+    return 0;
 }
 
 void MissionDB::LoadMiningData(DBQueryResult& res)
@@ -46,17 +89,17 @@ void MissionDB::CreateOfferID(MissionOffer& data)
     if (!sDatabase.RunQueryLID(err, uid,
         "INSERT INTO agtOffers(acceptFee, agentID, characterID, courierAmount, courierTypeID, courierVolume, dateAccepted, dateIssued, destinationID, destinationTypeID, "
         " destinationOwnerID, destinationSystemID, expiryTime, important, storyline, missionID, briefingID, name, offerID, originID, originOwnerID, originSystemID,"
-        " remoteCompletable, remoteOfferable, rewardISK, rewardItemID, rewardItemQty, rewardLP, bonusISK, bonusTime, stateID, typeID, dungeonLocationID, dungeonSolarSystemID)"
+        " remoteCompletable, remoteOfferable, rewardISK, rewardItemID, rewardItemQty, rewardExtraItemID, rewardLP, bonusISK, bonusTime, stateID, typeID, dungeonLocationID, dungeonSolarSystemID)"
         " VALUES ("
         " %u, %u, %u, %u, %u, %f, %f, %f, %u,"
         " %u, %u, %u, %f, %i, %u,"
         " %u, %u, '%s', %u, %u, %u, %u, %i,"
-        " %i, %u, %u, %u, %u, %u, %u, %u,"
+        " %i, %u, %u, %u, %u, %u, %u, %u, %u,"
         " %u, %u, %u)",
             data.acceptFee, data.agentID, data.characterID, data.courierAmount, data.courierTypeID, data.courierItemVolume, data.dateAccepted, data.dateIssued, data.destinationID,
             data.destinationTypeID, data.destinationOwnerID, data.destinationSystemID, data.expiryTime, (data.important?1:0), data.storyline,
             data.missionID, data.briefingID, data.name.c_str(), data.offerID, data.originID, data.originOwnerID, data.originSystemID,
-            (data.remoteCompletable?1:0), (data.remoteOfferable?1:0), data.rewardISK, data.rewardItemID, data.rewardItemQty,data.rewardLP, data.bonusISK, data.bonusTime,
+            (data.remoteCompletable?1:0), (data.remoteOfferable?1:0), data.rewardISK, data.rewardItemID, data.rewardItemQty, data.rewardExtraItemID, data.rewardLP, data.bonusISK, data.bonusTime,
             data.stateID, data.typeID, data.dungeonLocationID, data.dungeonSolarSystemID))
     {
         codelog(DATABASE__ERROR, "Failed to insert new MissionOffer: %s", err.c_str());
@@ -88,7 +131,7 @@ void MissionDB::LoadOpenOffers(DBQueryResult& res)
     if (!sDatabase.RunQuery(res,
         "SELECT acceptFee, agentID, characterID, courierAmount, courierTypeID, courierVolume, dateAccepted, dateIssued, destinationID, destinationTypeID, destinationOwnerID, destinationSystemID,"
         " expiryTime, important, storyline, missionID, briefingID, name, offerID, originID, originOwnerID, originSystemID, remoteCompletable, remoteOfferable, "
-        " rewardISK, rewardItemID, rewardItemQty, rewardLP, bonusISK, bonusTime, stateID, typeID, dungeonLocationID, dungeonSolarSystemID "
+        " rewardISK, rewardItemID, rewardItemQty, rewardExtraItemID, rewardLP, bonusISK, bonusTime, stateID, typeID, dungeonLocationID, dungeonSolarSystemID "
         " FROM agtOffers WHERE dateCompleted = 0 AND stateID < 3"))
         codelog(DATABASE__ERROR, "Error in LoadOpenOffers query: %s", res.error.c_str());
 }
@@ -98,7 +141,7 @@ void MissionDB::LoadClosedOffers(DBQueryResult& res)
 {
     if (!sDatabase.RunQuery(res,
         "SELECT agentID, characterID, courierAmount, courierTypeID, dateAccepted, dateCompleted, dateIssued, destinationID, expiryTime, important, storyline, missionID, name,"
-        " offerID, originID, rewardISK, rewardItemID, rewardItemQty, rewardLP, stateID, typeID FROM agtOffers WHERE dateCompleted > 0 OR expiryTime > %f OR stateID > 2", GetFileTimeNow()))
+        " offerID, originID, rewardISK, rewardItemID, rewardItemQty, rewardExtraItemID, rewardLP, stateID, typeID FROM agtOffers WHERE dateCompleted > 0 OR expiryTime > %f OR stateID > 2", GetFileTimeNow()))
         codelog(DATABASE__ERROR, "Error in LoadClosedOffers query: %s", res.error.c_str());
 }
 

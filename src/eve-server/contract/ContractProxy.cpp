@@ -27,6 +27,7 @@
 
 #include <boost/algorithm/string/replace.hpp>
 #include <algorithm>    // Added to prevent std::find from freaking out
+#include <vector>
 #include "eve-server.h"
 
 
@@ -74,8 +75,9 @@ ContractProxy::ContractProxy () :
 
 PyResult ContractProxy::SearchContracts(PyCallArgs &call) {
     // We will not proceed, if contractType is not specified
-    if (!call.byname.find("contractType")->second->IsNone()) {
-        int contractType = call.byname.find("contractType")->second->AsInt()->value();
+    auto itContractType = call.byname.find("contractType");
+    if (itContractType != call.byname.end() && !itContractType->second->IsNone()) {
+        int contractType = itContractType->second->AsInt()->value();
 
         /**
          * We're using sort of query constructor here - if request have certain value specified, we add it as another AND block.
@@ -90,41 +92,104 @@ PyResult ContractProxy::SearchContracts(PyCallArgs &call) {
                             "WHERE cC.contractType IN " + std::string(contractType == 10 ? "(1,2)" : "(" + std::to_string(contractType) + ")");
                                                          // Type 10 is "All" and "Exclude WTB", for some reason. We'll assume it's "All", lol
 
-        if (!call.byname.find("itemTypes")->second->IsNone()) {
-            PyList* itemTypes = call.byname.find("itemTypes")->second->AsObjectEx()->header()->AsTuple()->GetItem(1)->AsTuple()->GetItem(0)->AsList();
-            std::string types;
-            for (auto index = 0; index < itemTypes->size(); index++) {
-                types.append(std::to_string(itemTypes->GetItem(index)->AsInt()->value()));
-                if (index != itemTypes->size() - 1) {
-                    types.append(",");
+        auto bynameNonNone = [&call](const char* key) -> PyRep* {
+            auto it = call.byname.find(key);
+            if (it == call.byname.end() || it->second->IsNone())
+                return nullptr;
+            return it->second;
+        };
+
+        if (PyRep* pItemTypes = bynameNonNone("itemTypes"); pItemTypes != nullptr) {
+            std::vector<int> typeIds;
+            auto addRepInt = [&typeIds](PyRep* el) {
+                if (el == nullptr)
+                    return;
+                if (el->IsInt())
+                    typeIds.push_back(el->AsInt()->value());
+                else if (el->IsLong())
+                    typeIds.push_back(static_cast<int>(el->AsLong()->value()));
+            };
+
+            if (pItemTypes->IsList()) {
+                PyList* itemTypes = pItemTypes->AsList();
+                for (size_t i = 0; i < itemTypes->size(); ++i)
+                    addRepInt(itemTypes->GetItem(i));
+            } else if (pItemTypes->IsTuple()) {
+                PyTuple* tup = pItemTypes->AsTuple();
+                for (size_t i = 0; i < tup->size(); ++i)
+                    addRepInt(tup->GetItem(i));
+            } else if (pItemTypes->IsInt()) {
+                typeIds.push_back(pItemTypes->AsInt()->value());
+            } else if (pItemTypes->IsObjectEx()) {
+                /* Older client: ObjectEx header tuple wrapping a list of typeIDs */
+                PyObjectEx* ox = pItemTypes->AsObjectEx();
+                bool extracted = false;
+                PyRep* header = ox->header();
+                if (header != nullptr && header->IsTuple()) {
+                    PyTuple* ht = header->AsTuple();
+                    if (ht->size() >= 2) {
+                        PyRep* inner = ht->GetItem(1);
+                        if (inner != nullptr && inner->IsTuple()) {
+                            PyTuple* it = inner->AsTuple();
+                            if (it->size() >= 1) {
+                                PyRep* listRep = it->GetItem(0);
+                                if (listRep != nullptr && listRep->IsList()) {
+                                    PyList* itemTypes = listRep->AsList();
+                                    for (size_t i = 0; i < itemTypes->size(); ++i)
+                                        addRepInt(itemTypes->GetItem(i));
+                                    extracted = true;
+                                }
+                            }
+                        }
+                    }
                 }
+                if (!extracted && ox->list().size() == 1) {
+                    PyRep* only = ox->list().GetItem(0);
+                    if (only != nullptr && only->IsList()) {
+                        PyList* itemTypes = only->AsList();
+                        for (size_t i = 0; i < itemTypes->size(); ++i)
+                            addRepInt(itemTypes->GetItem(i));
+                        extracted = true;
+                    }
+                }
+                if (!extracted)
+                    codelog(SERVICE__WARNING, "SearchContracts: itemTypes has unrecognized ObjectEx layout; type filter omitted.");
+            } else {
+                codelog(SERVICE__WARNING, "SearchContracts: itemTypes is unsupported PyType %u; type filter omitted.",
+                    static_cast<unsigned>(pItemTypes->GetType()));
             }
 
-            if (!types.empty()) {
+            if (!typeIds.empty()) {
+                std::string types;
+                for (size_t index = 0; index < typeIds.size(); ++index) {
+                    if (index)
+                        types.append(",");
+                    types.append(std::to_string(typeIds[index]));
+                }
                 query.append(" AND e.typeID IN (" + types + ")");
             }
         }
 
-        if (!call.byname.find("itemGroupID")->second->IsNone()) {
-            query.append(" AND iG.groupID = " + std::to_string(call.byname.find("itemGroupID")->second->AsInt()->value()));
+        if (PyRep* v = bynameNonNone("itemGroupID"); v != nullptr) {
+            query.append(" AND iG.groupID = " + std::to_string(v->AsInt()->value()));
         }
-        if (!call.byname.find("itemCategoryID")->second->IsNone()) {
-            query.append(" AND iC.categoryID = " + std::to_string(call.byname.find("itemCategoryID")->second->AsInt()->value()));
+        if (PyRep* v = bynameNonNone("itemCategoryID"); v != nullptr) {
+            query.append(" AND iC.categoryID = " + std::to_string(v->AsInt()->value()));
         }
-        if (!call.byname.find("minPrice")->second->IsNone()) {
-            query.append(" AND cC.price >= " + std::to_string(call.byname.find("minPrice")->second->AsInt()->value()));
+        if (PyRep* v = bynameNonNone("minPrice"); v != nullptr) {
+            query.append(" AND cC.price >= " + std::to_string(v->AsInt()->value()));
         }
-        if (!call.byname.find("maxPrice")->second->IsNone()) {
-            query.append(" AND cC.price <= " + std::to_string(call.byname.find("maxPrice")->second->AsInt()->value()));
+        if (PyRep* v = bynameNonNone("maxPrice"); v != nullptr) {
+            query.append(" AND cC.price <= " + std::to_string(v->AsInt()->value()));
         }
-        if (!call.byname.find("minReward")->second->IsNone()) {
-            query.append(" AND cC.reward >= " + std::to_string(call.byname.find("minReward")->second->AsInt()->value()));
+        if (PyRep* v = bynameNonNone("minReward"); v != nullptr) {
+            query.append(" AND cC.reward >= " + std::to_string(v->AsInt()->value()));
         }
-        if (!call.byname.find("maxReward")->second->IsNone()) {
-            query.append(" AND cC.reward <= " + std::to_string(call.byname.find("maxReward")->second->AsInt()->value()));
+        if (PyRep* v = bynameNonNone("maxReward"); v != nullptr) {
+            query.append(" AND cC.reward <= " + std::to_string(v->AsInt()->value()));
         }
-        if (!call.byname.find("availability")->second->IsNone()) {
-            int availability = call.byname.find("availability")->second->AsInt()->value();
+        if (PyRep* v = bynameNonNone("availability"); v != nullptr) {
+            int availability = v->AsInt()->value();
             if (availability == 0) {
                 // Public contracts
                 query.append(" AND cC.isPrivate = 0");
@@ -137,8 +202,8 @@ PyResult ContractProxy::SearchContracts(PyCallArgs &call) {
             }
         }
         // According to what i had during testing, locationID can only be system, constellation or region. Given that we only store system and region ID, we use OR clause for these
-        if (!call.byname.find("locationID")->second->IsNone()) {
-            int locationId = call.byname.find("locationID")->second->AsInt()->value();
+        if (PyRep* v = bynameNonNone("locationID"); v != nullptr) {
+            int locationId = v->AsInt()->value();
             if (IsSolarSystemID(locationId)) {
                 // Solar system range
                 query.append(" AND cC.startSolarSystemID = " + std::to_string(locationId));
@@ -148,8 +213,8 @@ PyResult ContractProxy::SearchContracts(PyCallArgs &call) {
             }
         }
         // Same applies to endLocationID - it uses the same search::QuickQuery() call to get it
-        if (!call.byname.find("endLocationID")->second->IsNone()) {
-            int locationId = call.byname.find("endLocationID")->second->AsInt()->value();
+        if (PyRep* v = bynameNonNone("endLocationID"); v != nullptr) {
+            int locationId = v->AsInt()->value();
             if (IsSolarSystemID(locationId)) {
                 // Solar system range
                 query.append(" AND cC.endSolarSystemID = " + std::to_string(locationId));
@@ -159,8 +224,8 @@ PyResult ContractProxy::SearchContracts(PyCallArgs &call) {
             }
         }
         // Once again, issuer can be either a character or a corporation. We use separate filters depending on value
-        if (!call.byname.find("issuerID")->second->IsNone()) {
-            int issuerId = call.byname.find("issuerID")->second->AsInt()->value();
+        if (PyRep* v = bynameNonNone("issuerID"); v != nullptr) {
+            int issuerId = v->AsInt()->value();
             if (IsCorp(issuerId)) {
                 // Corporation case
                 query.append(" AND cC.issuerCorpID = " + std::to_string(issuerId) + " AND cC.forCorp = true");
@@ -245,18 +310,18 @@ PyResult ContractProxy::CreateContract(PyCallArgs &call,
     /**
      * Since named args (byname) aren't included in packet, we process them separately.
      */
-    if (call.byname.find("flag")->second->IsInt()) {
-        startStationDivision = call.byname.find("flag")->second->AsInt()->value();
-    } else {
-        codelog(SERVICE__ERROR, "startStationDivision value is of invalid type");
+    auto itFlag = call.byname.find("flag");
+    if (itFlag == call.byname.end() || !itFlag->second->IsInt()) {
+        codelog(SERVICE__ERROR, "startStationDivision (flag) missing or not an integer");
         return nullptr;
     }
-    if (call.byname.find("forCorp")->second->IsBool()) {
-        forCorp = call.byname.find("forCorp")->second->AsBool()->value();
-    } else {
-        codelog(SERVICE__ERROR, "forCorp value is of invalid type");
+    startStationDivision = itFlag->second->AsInt()->value();
+    auto itForCorp = call.byname.find("forCorp");
+    if (itForCorp == call.byname.end() || !itForCorp->second->IsBool()) {
+        codelog(SERVICE__ERROR, "forCorp missing or not a bool");
         return nullptr;
     }
+    forCorp = itForCorp->second->AsBool()->value();
     if (sDataMgr.IsStation(startStationID->value())) {
         startSystemId = sDataMgr.GetStationSystem(startStationID->value());
         startRegionId = sDataMgr.GetStationRegion(startStationID->value());
@@ -291,6 +356,13 @@ PyResult ContractProxy::CreateContract(PyCallArgs &call,
      * Then, we go for actual entries creation.
      * Contract entry
      */
+    std::string titleEsc(title->content());
+    std::string descEsc(description->content());
+    boost::replace_all(titleEsc, "\\", "\\\\");
+    boost::replace_all(descEsc, "\\", "\\\\");
+    boost::replace_all(titleEsc, "'", "''");
+    boost::replace_all(descEsc, "'", "''");
+
     uint32 contractId = 0;
     DBerror err;
     if (!sDatabase.RunQueryLID(err, contractId,
@@ -307,7 +379,7 @@ PyResult ContractProxy::CreateContract(PyCallArgs &call,
         contractType->value(), call.client->GetCharacterID(), call.client->GetCorporationID(), forCorp, isPrivate->value()?1:0, assigneeID.has_value() ? assigneeID.value()->value() : 0,
         int64(GetFileTimeNow()), int64(GetRelativeFileTime(0, 0, expireTime->value())), expireTime->value(), duration->value(), expireTime->value() / 1440,
         startStationID->value(), startSystemId, startRegionId, endStationID.has_value() ? endStationID.value()->value() : 0, endSystemId, endRegionId,
-        price->value(), reward->value(), collateral->value(), title->content().c_str(), description->content().c_str(), call.client->GetAllianceID(), startStationDivision))
+        price->value(), reward->value(), collateral->value(), titleEsc.c_str(), descEsc.c_str(), call.client->GetAllianceID(), startStationDivision))
     {
         codelog(DATABASE__ERROR, "Failed to insert new entity: %s", err.c_str());
         return nullptr;
@@ -320,8 +392,9 @@ PyResult ContractProxy::CreateContract(PyCallArgs &call,
      */
     std::string itemsToInsert;
     float totalVolume = 0.00;
-    if (call.byname.find("itemList")->second->IsList()) {
-        PyList *tradedItems = call.byname.find("itemList")->second->AsList();
+    auto itItemList = call.byname.find("itemList");
+    if (itItemList != call.byname.end() && itItemList->second->IsList()) {
+        PyList *tradedItems = itItemList->second->AsList();
         if (!tradedItems->empty()) {
             //TODO: We need to account for items that can be packed in a container/ship/container inside the ship
             std::string query = "SELECT entity.itemID, entity.ownerID, entity.typeID, entity.quantity, entity.locationID, iB.pLevel, "
@@ -376,7 +449,7 @@ PyResult ContractProxy::CreateContract(PyCallArgs &call,
                      itemsToInsert.append("(" + std::to_string(contractId) + ", " +
                         std::to_string(itemID) + ", " +
                         std::to_string(quantity) + ", " +
-                        row.GetText(2) + ", " +
+                        std::to_string(row.GetInt(2)) + ", " +
                         "1, " +
                         std::to_string(parentID) + ", " +
                         std::to_string(pLevel) + ", " +
@@ -398,8 +471,9 @@ PyResult ContractProxy::CreateContract(PyCallArgs &call,
     }
 
 
-    if (call.byname.find("requestItemTypeList")->second->IsList()) {
-        PyList *requestedItems = call.byname.find("requestItemTypeList")->second->AsList();
+    auto itReqList = call.byname.find("requestItemTypeList");
+    if (itReqList != call.byname.end() && itReqList->second->IsList()) {
+        PyList *requestedItems = itReqList->second->AsList();
         if (!requestedItems->empty()) {
             for (int index = 0; index < requestedItems->size(); index++) {
                 PyList *requestedItem = requestedItems->GetItem(index)->AsList();
@@ -522,7 +596,8 @@ PyResult ContractProxy::AcceptContract(PyCallArgs &call, PyInt* contractID) {
                     }
                 }
                 if (reward > 0) {
-                    if (sItemFactory.GetCharacterRef(issuerID)->balance(Account::CreditType::ISK) < reward) {
+                    CharacterRef issuerChar = sItemFactory.GetCharacterRef(issuerID);
+                    if (issuerChar.get() == nullptr || issuerChar->balance(Account::CreditType::ISK) < reward) {
                         rewardRequirementMet = false;
                     }
                 }

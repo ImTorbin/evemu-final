@@ -28,6 +28,8 @@
 
 #include "corporation/LPService.h"
 #include "account/AccountService.h"
+#include <utility>
+#include <vector>
 
 LPService::LPService() :
     Service("LPSvc", eAccessLevel_Character)
@@ -67,13 +69,11 @@ int LPService::GetLPReward(uint16 missionID, uint32 solarsystemID, uint8 agentLe
 }
 
 PyResult LPService::TakeOffer(PyCallArgs& call, PyInt* corpID, PyInt* storeID) {
-  if (!corpID->value() >= 1000000 && !corpID->value() <= 1000200) { // Bounds check valid corpID in call
+  if (corpID->value() < 1000000 || corpID->value() > 1000200)
     return new PyNone;
-  }
 
-  if (!storeID->value() >= 1 && !storeID->value() <= 30000) { // Bounds check valid storeID in call
+  if (storeID->value() < 1 || storeID->value() > 30000)
     return new PyNone;
-  }
 
   // Lookup Store Offer
   DBResultRow offer = GetLPOffer(storeID->value());
@@ -93,11 +93,17 @@ PyResult LPService::TakeOffer(PyCallArgs& call, PyInt* corpID, PyInt* storeID) {
     throw CustomError("You do not have enough ISK to make this purchase.");
   }
 
-  // Check required items & remove if all are present.
   DBQueryResult requiredItems = GetRequiredItemsForOffer(storeID->value());
-  if (requiredItems.GetRowCount() > 0) {
-    // TODO: Remove required from hangar, the client pre-checks the required items are available or else the button is hidden.
+  std::vector<std::pair<int32_t, int32_t>> reqs;
+  DBResultRow reqRow;
+  while (requiredItems.GetRow(reqRow))
+    reqs.emplace_back(reqRow.GetInt(0), reqRow.GetInt(1));
+  for (const auto& p : reqs) {
+    if (!call.client->ContainsTypeQty(static_cast<uint16_t>(p.first), static_cast<uint32_t>(p.second)))
+      throw CustomError("You do not have the required items for this offer.");
   }
+  for (const auto& p : reqs)
+    call.client->RemoveMissionItem(static_cast<uint16_t>(p.first), static_cast<uint32_t>(p.second));
 
   // Remove LP & ISK
   AddLP(call.client->GetCharacterID(), corpID->value(), -lpCost);

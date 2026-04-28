@@ -1,0 +1,23 @@
+# Juro Darksynth smuggling couriers (qstCourier 58359–58365) — copy into client string DB / mod if you want custom [no messageID] text.
+# The live mission body still comes from briefingID in the DB until those IDs are mapped.
+
+58359 — Unscheduled Displacement
+Imperial rosters show too many people in one place and not enough in another. Your hold will carry a short manifest that does not use their vocabulary. Get it to the hand-off without customs asking questions you cannot answer. Standard fee on completion; a premium if you are punctual.
+
+58360 — Grey-Label Supply
+Bulk reagents, repackaged for retail where labels are a suggestion. The buyer pays for results, not brand loyalty. Haul the lot before chain-of-custody becomes an academic exercise.
+
+58361 — Cultural Reassignment
+Some finds are not meant for display cases. They are personal effects that need a quieter audience. You are the courier, not the curator. Move them, do not discuss provenance in front of people who file reports.
+
+58362 — Biomass on the Move
+They call it waste stream recycling in one jurisdiction and a humanitarian scandal in the next. Our invoice calls it a priority route. The tankage is your problem until signature at delivery; keep the seals intact.
+
+58363 — Street-Grade Haulage
+Dilute enough for clubs; concentrated enough to matter. Keep temperature stable and the manifest vague. The bonus is for speed, not for explaining your cargo to a patrol with a sniffer and a notepad.
+
+58364 — Blind-Stamp Cargo
+Pallets with cleared paperwork on top and less cleared layers underneath. Do not jostle the stack, do not scan the bottom, do not be curious in range of a camera. Punctual delivery pays extra.
+
+58365 — Hardened Legality
+A hull template that is legal to own but rude to import without the right names on the docket. You are not building the ship, you are moving the right to. Treat it as documents that weigh like metal.

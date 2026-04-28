@@ -52,6 +52,7 @@ EntityList::EntityList()
 : m_services(nullptr),
 m_targTimer(0, true),
 m_stampTimer(0, true),
+m_dynamicDestinyTimer(0, true),
 m_minuteTimer(0, true),
 m_startTime(0),
 m_npcs(0),
@@ -82,6 +83,14 @@ void EntityList::Initialize() {
     /* start the timers */
     m_targTimer.Start(250);     // testing targeting and scan probes at 4/sec
     m_stampTimer.Start(1000);   // 1hz tic timer
+    {
+        uint32 ddms(static_cast<uint32>(sConfig.server.DynamicDestinyMs));
+        if (ddms < 10)
+            ddms = 10;
+        else if (ddms > 100)
+            ddms = 100;
+        m_dynamicDestinyTimer.Start(ddms); // NPC / non-pilot subwarp: orbit,FOLLOW,GOTO (~10–100 Hz by config)
+    }
     m_minuteTimer.Start(60000); // does this need to be accurate?
 
     m_clientSeedID = ServiceDB::SetClientSeed();
@@ -196,6 +205,12 @@ void EntityList::Process() {
             citr = m_clients.erase(citr);
             SafeDelete(pClient);
         }
+    }
+
+    if (m_dynamicDestinyTimer.Check()) {
+        for (auto& cur : m_systems)
+            if (cur.second != nullptr)
+                cur.second->ProcessDynamicDestiny();
     }
 
     if (m_targTimer.Check()) {

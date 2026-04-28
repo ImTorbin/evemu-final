@@ -33,6 +33,11 @@ sed -i "s/database_password/$MARIADB_PASSWORD/" /src/utils/config/eve-server.xml
 sed -i "s/database_name/$MARIADB_DATABASE/" /src/utils/config/eve-server.xml
 sed -i "s/database_port/$MARIADB_PORT/" /src/utils/config/eve-server.xml
 
+# Client-visible HTTP host for portraits (handshake). Use your Windows Hamachi IPv4 when friends connect via VPN.
+# In Docker, listenAddress must stay empty; only imageServer needs the Hamachi IP.
+if [ -n "${HAMACHI_IP:-}" ]; then
+    sed -i "s#<imageServer>[^<]*</imageServer>#<imageServer>${HAMACHI_IP}</imageServer>#" /src/utils/config/eve-server.xml
+fi
 
 # Write evedb.yaml based upon above variables
 cd /src/sql

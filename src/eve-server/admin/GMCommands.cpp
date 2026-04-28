@@ -50,6 +50,23 @@
 #include "corporation/LPService.h"
 #include "corporation/CorporationDB.h"
 
+namespace {
+/**
+ * Notify SkillsSvc.OnAdminSkillChange (macho.Notification). Args must be exactly
+ * (skillItemID, skillTypeID, newSP): the event name is already the notify route.
+ * OnAdminSkillChange::Encode() includes a leading string for destiny OnMultiEvent and must not be used here.
+ */
+void SendOnAdminSkillChange(Client* client, uint32 skillItemID, uint32 skillTypeID, int64 newSP) {
+    if (client == nullptr)
+        return;
+    PyTuple* args = new PyTuple(3);
+    args->SetItem(0, new PyInt(skillItemID));
+    args->SetItem(1, new PyInt(skillTypeID));
+    args->SetItem(2, new PyLong(newSP));
+    client->SendNotification("OnAdminSkillChange", "charid", args, true);
+}
+} // namespace
+
 PyResult Command_search(Client* who, CommandDB* db, EVEServiceManager &services, const Seperator& args) {
     if (args.argCount() < 2) {
         throw CustomError ("Correct Usage: /search [text]");
@@ -568,20 +585,15 @@ PyResult Command_giveallskills(Client* who, CommandDB* db, EVEServiceManager &se
             ownerID = who->GetCharacterID();
             character = who->GetChar();
             pTarget = who;
-        } else if (!args.isNumber(1)) {
+        } else {
             throw CustomError ("The use of string based Character names for this command is not yet supported!  Use 'me' instead or the entityID of the character to which you wish to give skills.");
-            /*
-             *            const char *name = args.arg(1).c_str();
-             *            Client *target = sEntityList.FindCharacter(name);
-             *           if (target == NULL)
-             *                throw PyException(MakeCustomError("Cannot find Character by the name of %s", name));
-             *            ownerID = target->GetCharacterID();
-             *            character = target->GetChar();
-             */
-        } else
-            throw CustomError ("Argument 1 must be Character ID or Character Name ");
+        }
+    } else if (args.argCount() == 1) {
+        ownerID = who->GetCharacterID();
+        character = who->GetChar();
+        pTarget = who;
     } else
-        throw CustomError ("Correct Usage: /giveallskills [Character Name or ID]");
+        throw CustomError ("Correct Usage: /giveallskills [me|CharacterID]");
 
     // Make sure character reference is not NULL before trying to use it:
     if (character.get()) {
@@ -624,14 +636,9 @@ PyResult Command_giveallskills(Client* who, CommandDB* db, EVEServiceManager &se
 
             skill->SaveItem();
 
-            OnAdminSkillChange oasc;
-            oasc.skillItemID = skill->itemID();
-            oasc.skillTypeID = skillID;
-            oasc.newSP = skill->GetSPForLevel(level);
-            PyTuple* tmp = oasc.Encode();
-            pTarget->QueueDestinyEvent(&tmp);
+            SendOnAdminSkillChange(pTarget, skill->itemID(), skillID, skill->GetSPForLevel(level));
 
-            character->SaveSkillHistory(EvESkill::Event::GMGift, Win32TimeNow(), ownerID, skillID, level, \
+            character->SaveSkillHistory(EvESkill::Event::GMGift, GetFileTimeNow(), ownerID, skillID, level, \
             skill->GetAttribute(AttrSkillPoints).get_double());
         }
         // END LOOP
@@ -652,7 +659,17 @@ PyResult Command_giveskill(Client* who, CommandDB* db, EVEServiceManager &servic
     CharacterRef character;
     Client *pTarget(nullptr);
 
-    if (args.argCount() == 4) {
+    if (args.argCount() == 3) {
+        ownerID = who->GetCharacterID();
+        character = who->GetChar();
+        pTarget = who;
+        if (!args.isNumber(1))
+            throw CustomError ("Argument 1 must be skill type ID.");
+        skillID = atoi(args.arg(1).c_str());
+        if (!args.isNumber(2))
+            throw CustomError ("Argument 2 must be level");
+        level = atoi(args.arg(2).c_str());
+    } else if (args.argCount() == 4) {
         if (args.isNumber(1)) {
             ownerID = atoi(args.arg(1).c_str());
             pTarget = sEntityList.FindClientByCharID(ownerID);
@@ -663,18 +680,9 @@ PyResult Command_giveskill(Client* who, CommandDB* db, EVEServiceManager &servic
             ownerID = who->GetCharacterID();
             character = who->GetChar();
             pTarget = who;
-        } else if (!args.isNumber(1)) {
+        } else {
             throw CustomError ("The use of string based Character names for this command is not yet supported!  Use 'me' instead or the entityID of the character to which you wish to give skills.");
-            /*
-            const char *name = args.arg(1).c_str();
-            pTarget = sEntityList.FindClientByName(name);
-            if (!pTarget)
-                throw PyException(MakeCustomError("Cannot find Character by the name of %s", name));
-            ownerID = pTarget->GetCharacterID();
-            character = pTarget->GetChar();
-            */
-        } else
-            throw CustomError ("Argument 1 must be Character ID or Character Name ");
+        }
 
         if (!args.isNumber(2))
             throw CustomError ("Argument 2 must be type ID.");
@@ -683,11 +691,13 @@ PyResult Command_giveskill(Client* who, CommandDB* db, EVEServiceManager &servic
         if (!args.isNumber(3))
             throw CustomError ("Argument 3 must be level");
         level = atoi(args.arg(3).c_str());
-
-        if (level > EvESkill::MAXSKILLLEVEL)
-            level = EvESkill::MAXSKILLLEVEL;
     } else
-        throw CustomError ("Correct Usage: .giveskill [me/CharacterID] [skillID] [level]");
+        throw CustomError ("Correct Usage: .giveskill [skillID] [level]  or  .giveskill [me/CharacterID] [skillID] [level]");
+
+    if (level < 1)
+        level = 1;
+    if (level > EvESkill::MAXSKILLLEVEL)
+        level = EvESkill::MAXSKILLLEVEL;
 
     // Make sure references are not NULL before trying to use them
     if ((pTarget == nullptr) or (character.get() == nullptr))
@@ -695,8 +705,7 @@ PyResult Command_giveskill(Client* who, CommandDB* db, EVEServiceManager &servic
 
     SkillRef skill;
     if (character->HasSkillTrainedToLevel(skillID, level)) {
-        // already trained to requested level
-        return PyStatic.NewNone();
+        return new PyString("Skill already at or above requested level.");
     } else if (character->HasSkill(skillID)) {
         // has skill injected, so update level
         skill = character->GetCharSkillRef(skillID);
@@ -728,15 +737,10 @@ PyResult Command_giveskill(Client* who, CommandDB* db, EVEServiceManager &servic
     //  save gm skill gift in history  -allan
     character->SaveSkillHistory(EvESkill::Event::GMGift, GetFileTimeNow(), ownerID, skillID, level, newPoints);
 
-    OnAdminSkillChange oasc;
-        oasc.skillItemID = skill->itemID();
-        oasc.skillTypeID = skillID;
-        oasc.newSP = newPoints;
-    PyTuple* tmp = oasc.Encode();
-    pTarget->QueueDestinyEvent(&tmp);
+    SendOnAdminSkillChange(pTarget, skill->itemID(), skillID, newPoints);
 
     _log(SKILL__MESSAGE, "GM::GiveSkill - %s(%u) set to level %u with %u SP.", skill->name(), skillID, level, newPoints);
-    return PyStatic.NewNone();
+    return new PyString("Skill updated.");
 }
 
 PyResult Command_online(Client *who, CommandDB *db, EVEServiceManager& services, const Seperator &args) {

@@ -30,6 +30,25 @@
 #include "eve-server.h"
 #include "POD_containers.h"
 
+#include <string>
+#include <vector>
+
+struct CQCustomAgentRow {
+    /// Primary key in staCQCustomAgents
+    uint32 agentID{0};
+    /// When zero: protocol uses 0xC0+agentID. When set: use mission agent (agtAgents) for convo/entity.
+    uint32 missionAgentID{0};
+    /// Protocol id for mannequin-only rows; never collides with players when high bit set
+    uint32 instanceCharID{0};
+    uint32 appearanceCharID{0};
+    double posX{0}, posY{0}, posZ{0};
+    float  yaw{0};
+    uint32 corporationID{0};
+    uint32 bloodlineID{0};
+    uint32 raceID{0};
+    uint8  genderID{0};
+};
+
 /**
  * This object is the home for common DB operations which may be needed by many
  * different service objects. It should be inherited by each serviceDB
@@ -58,6 +77,25 @@ public:
     static uint32 GetOrCreateCQWorldSpace(uint32 stationID);
     static void SetCQOccupancy(uint32 worldSpaceID, uint32 characterID, bool inWorldspace);
     static uint32 GetSceneIDForStation(uint32 stationID);
+
+    static uint32 CQInstanceCharIDFromAgentID(uint32 agentID);
+    static bool CQAgentIDFromInstanceCharID(uint32 instanceCharID, uint32& outAgentID);
+    static void GetCQCustomAgentsForStation(uint32 stationID, std::vector<CQCustomAgentRow>& into);
+    /** Sync staCQCustomAgents with agtAgents (Basic, non-locator) at this station; assigns predefined CQ floor slots (then arc). Re-UPDATEs poses when they drift. Sets *outLayoutChanged if DB was modified. */
+    static void EnsureCQMissionAgentSpawnsForStation(uint32 stationID, bool* outLayoutChanged = nullptr);
+    /**
+     * Basic mission agents only: if they have no avatar_modifiers yet, clone a random dressed chrCharacters
+     * row (gender match preferred) onto missionAgentCharID and persist. Safe to call from CQ ensure or paperDoll RPC.
+     */
+    static bool EnsureRandomMissionAgentPaperDollInDb(uint32 missionAgentCharID);
+    static bool InsertCQCustomAgent(uint32 stationID, uint32 appearanceCharID, double x, double y, double z, float yaw, const std::string& label, uint32& outInstanceCharID);
+    static bool UpdateCQCustomAgentTransformByInstance(uint32 instanceCharID, double x, double y, double z, float yaw);
+    static bool DeleteCQCustomAgentByInstance(uint32 instanceCharID);
+    static bool GetCQCustomAgentStationID(uint32 instanceCharID, uint32& outStationID);
+    static bool GetCQCustomAgentByInstance(uint32 instanceCharID, CQCustomAgentRow& out);
+    /// Resolve staCQ row for debug RPC: protocolId is either 0xC0-prefixed or missionAgentID
+    static bool GetCQTableAgentIdFromProtocolId(uint32 protocolCharId, uint32& outStaAgentId);
+    static bool GetCQCustomAgentByTableId(uint32 staAgentId, CQCustomAgentRow& out);
 
     static uint32 SetClientSeed();
 

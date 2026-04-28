@@ -95,7 +95,9 @@ PyResult DungeonExplorationMgrService::GetMyEscalatingPathDetails(PyCallArgs &ca
     sLog.White("DungeonExplorationMgrService::Handle_GetMyEscalatingPathDetails()",  "size=%lu", call.tuple->size());
     call.Dump(SERVICE__CALL_DUMP);
 
-    return PyStatic.NewNone();
+    // Client journal ShowExpeditions() does `for expeditionData in expeditionRowset` — None crashes.
+    // Empty list until escalation path tracking is implemented.
+    return new PyList();
 }
 
 

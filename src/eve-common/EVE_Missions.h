@@ -18,6 +18,11 @@ struct MissionData {
         uint32 constellationID;
         uint32 corporationID;
         uint32 dungeonID;
+        uint32 rewardISK;
+        uint32 bonusISK;
+        uint16 bonusTime;
+        uint16 rewardItemID;
+        uint16 rewardItemQty;
         std::string name;
 };
 
@@ -35,6 +40,8 @@ struct MissionOffer {
     uint16 rewardLP;
     uint16 rewardItemID;
     uint16 rewardItemQty;
+    /** Optional second reward (e.g. Juro 58373 ship BPC typeID while rewardItemID is a module). */
+    uint16 rewardExtraItemID;
     uint16 courierTypeID;
     uint16 courierAmount;
     uint16 destinationTypeID;
@@ -70,6 +77,7 @@ struct CourierData {
     uint8 typeID;
     uint8 range;
     uint8 raceID;
+    uint8 chainIndex;           // 0 = no ordering; 1..N = mission chain step (EVEmu Juro, etc.)
     uint16 bonusTime;
     uint16 missionID;
     uint16 itemTypeID;

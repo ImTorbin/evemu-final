@@ -136,6 +136,7 @@
 #include "market/MarketBotMgr.h"
 // missions services
 #include "missions/MissionMgrService.h"
+#include "notify/DiscordWebhook.h"
 // planet services
 #include "planet/Planet.h"
 #include "planet/PlanetDataMgr.h"
@@ -254,6 +255,30 @@ int main( int argc, char* argv[] )
     std::printf("\n");     // spacer
 
     sLog.Green("       ServerInit", "Server Configuration Files Loaded.");
+#if !defined(HAVE_LIBCURL)
+    if (sConfig.discord.enabled) {
+        const bool anyDiscordUrl = !sConfig.discord.webhookRareLootURL.empty()
+            || !sConfig.discord.webhookExpensiveDeathURL.empty()
+            || !sConfig.discord.webhookServerUpURL.empty();
+        if (anyDiscordUrl)
+            sLog.Warning("       ServerInit",
+                "Discord URLs are configured but this eve-server was built WITHOUT libcurl (HAVE_LIBCURL undefined). "
+                "Webhook deliveries are compiled out — install libcurl development headers (e.g. Debian: libcurl4-openssl-dev) and rebuild.");
+    }
+#else
+    const bool hasRareLootUrl = !sConfig.discord.webhookRareLootURL.empty();
+    const bool hasRareDeathUrl = !sConfig.discord.webhookExpensiveDeathURL.empty();
+    const bool hasServerUpUrl = !sConfig.discord.webhookServerUpURL.empty();
+    if (hasServerUpUrl)
+        sLog.Green("       ServerInit",
+            "Discord: libcurl linked — server-up webhook URL set (POST after main loop starts; independent of <enabled>).");
+    if (hasRareLootUrl)
+        sLog.Green("       ServerInit",
+            "Discord: libcurl linked — rare loot webhook posts when wreck has type metaLevel > rareLootMetaGt (independent of <enabled>).");
+    if (sConfig.discord.enabled && hasRareDeathUrl)
+        sLog.Green("       ServerInit",
+            "Discord: libcurl linked — expensive-death webhook uses min ISK threshold + cooldown (<enabled> must be true).");
+#endif
     std::printf("\n");     // spacer
 
     sLog.Blue("     ServerConfig", "Main Loop Settings");
@@ -590,8 +615,12 @@ int main( int argc, char* argv[] )
     EVETCPServer tcps;
     char errbuf[ TCPCONN_ERRBUF_SIZE ];
     sLog.Green( "       ServerInit", "Starting TCP Server");
-    if (tcps.Open(sConfig.net.port, errbuf)) {
-        sLog.Blue( "    BaseTCPServer", "TCP Server started on port %u.", sConfig.net.port );
+    const char* bindAddr = sConfig.net.listenAddress.empty() ? nullptr : sConfig.net.listenAddress.c_str();
+    if (tcps.Open(sConfig.net.port, errbuf, bindAddr)) {
+        if (sConfig.net.listenAddress.empty())
+            sLog.Blue( "    BaseTCPServer", "TCP Server listening on 0.0.0.0:%u (all interfaces).", sConfig.net.port );
+        else
+            sLog.Blue( "    BaseTCPServer", "TCP Server listening on %s:%u.", sConfig.net.listenAddress.c_str(), sConfig.net.port );
     } else {
         sLog.Error( "    BaseTCPServer", "Error starting TCP Server: %s.", errbuf );
         std::cout << std::endl << "press any key to exit...";  std::cin.get();
@@ -895,6 +924,8 @@ int main( int argc, char* argv[] )
     ServiceDB::SetServerOnlineStatus(true);
     sLog.Green("       ServerInit", "EVEmu Server is Online.");
 
+    DiscordWebhook_NotifyServerUp(currentDateTime(), std::string(EVEMU_REVISION));
+
     sLog.Cyan("           Server", "Started on %s", currentDateTime().c_str());
 
     /////////////////////////////////////////////////////////////////////////////////////
@@ -978,6 +1009,9 @@ int main( int argc, char* argv[] )
     /* close the db handler */
     sLog.Warning("   ServerShutdown", "Closing DataBase Connection." );
     sDatabase.Close();
+
+    DiscordWebhook_Shutdown();
+
     /** @todo  the thread system is only implemented for tcp connections at this time. */
     sLog.Warning("   ServerShutdown", "Shutting down Thread Manager." );
     /* join open threads */

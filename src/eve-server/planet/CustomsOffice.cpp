@@ -401,6 +401,7 @@ PyDict *CustomsSE::MakeSlimItem() {
     _log(POS__SLIMITEM, "MakeSlimItem for CustomsSE %u", m_cData.itemID);
     /** @todo (Allan) *Timestamp will need to be set to time current state is started. */
     PyDict *slim = new PyDict();
+    slim->SetItemString("ballID",               new PyLong(m_cData.itemID));
     slim->SetItemString("name",                 new PyString(m_self->itemName()));
     slim->SetItemString("nameID",               PyStatic.NewNone());
     slim->SetItemString("itemID",               new PyLong(m_cData.itemID));
@@ -541,7 +542,7 @@ void CustomsSE::Killed(Damage &damage) {
         _log(PHYSICS__TRACE, "Ship::Killed() - Ship %s(%u) Position: %.2f,%.2f,%.2f.  Wreck %s(%u) Position: %.2f,%.2f,%.2f.", \
         GetName(), GetID(), x(), y(), z(), wreckItemRef->name(), wreckItemRef->itemID(), wreckPosition.x, wreckPosition.y, wreckPosition.z);
 
-    DropLoot(wreckItemRef, m_self->groupID(), killerID);
+    DropLoot(wreckItemRef, m_self->groupID(), killerID, pClient != nullptr);
 
     for (auto cur: survivedItems)
         cur->Move(wreckItemRef->itemID(), flagNone); // populate wreck with items that survived

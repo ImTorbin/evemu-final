@@ -12,6 +12,8 @@
 #ifndef _EVE_SERVER_MISSION_DATABASE_H__
 #define _EVE_SERVER_MISSION_DATABASE_H__
 
+#include <vector>
+
 #include "../ServiceDB.h"
 #include "../eve-server.h"
 #include "../../eve-common/EVE_Missions.h"
@@ -32,6 +34,9 @@ public:
 
     static void DeleteOffer(MissionOffer& data);
     static void RemoveMissionItem(uint32 charID, uint16 typeID, uint32 qty);   // this is for removing mission items from offline clients.
+    static uint32 CountCompletedOffersForAgent(uint32 characterID, uint32 agentID);
+    /** Completed offers whose missionID is in this list (chain templates only — avoids legacy template completions skewing step). */
+    static uint32 CountCompletedChainOffersForAgent(uint32 characterID, uint32 agentID, const std::vector<uint16_t>& chainMissionIDs);
 
 protected:
 

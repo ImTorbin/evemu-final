@@ -615,10 +615,29 @@ PyResult RamProxyService::CompleteJob(PyCallArgs &call, PyRep* info, PyRep* jobI
         BlueprintRef bpRef = BlueprintRef::StaticCast( installedItem );
         switch(data.activity) {
             case EvERam::Activity::Manufacturing: {
-                ItemData idata(bpRef->productTypeID(), data.ownerID, locTemp, flagFactoryOutput, (bpRef->productType().portionSize() * data.jobRuns));
-                InventoryItemRef iRef = sItemFactory.SpawnItem( idata );
-                if (iRef.get() != nullptr)
-                    iRef->Move(args.containerID, data.outputFlag, true);
+                const ItemType& prodType = bpRef->productType();
+                const uint32 outQty = prodType.portionSize() * data.jobRuns;
+                if (prodType.categoryID() == EVEDB::invCategories::Ship) {
+                    // Ships must be singletons; stacking constructor yields a broken row the client ignores.
+                    int runs = data.jobRuns * prodType.portionSize();
+                    if (runs < 1)
+                        runs = 1;
+                    for (int i = 0; i < runs; ++i) {
+                        ItemData idata(prodType.id(), data.ownerID, locTemp, flagFactoryOutput, prodType.name().c_str());
+                        InventoryItemRef iRef = sItemFactory.SpawnItem(idata);
+                        if (iRef.get() != nullptr)
+                            iRef->Move(args.containerID, data.outputFlag, true);
+                        else
+                            _log(MANUF__ERROR, "CompleteJob: failed to spawn manufactured ship type %u job %u", prodType.id(), args.jobID);
+                    }
+                } else {
+                    ItemData idata(prodType.id(), data.ownerID, locTemp, flagFactoryOutput, outQty);
+                    InventoryItemRef iRef = sItemFactory.SpawnItem(idata);
+                    if (iRef.get() != nullptr)
+                        iRef->Move(args.containerID, data.outputFlag, true);
+                    else
+                        _log(MANUF__ERROR, "CompleteJob: failed to spawn manufactured item type %u job %u", prodType.id(), args.jobID);
+                }
             } break;
             case EvERam::Activity::ResearchTime: {
                 bpRef->UpdatePLevel(data.jobRuns);

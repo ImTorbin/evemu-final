@@ -34,8 +34,11 @@
 #include "Client.h"
 #include "EntityList.h"
 #include "EVEServerConfig.h"
+#include "StaticDataMgr.h"
+#include "notify/DiscordWebhook.h"
 #include "manufacturing/Blueprint.h"
 #include "map/MapDB.h"
+#include "corporation/CorporationDB.h"
 #include "npc/NPC.h"
 #include "npc/NPCAI.h"
 #include "npc/Drone.h"
@@ -112,6 +115,14 @@ bool SystemEntity::ApplyDamage(Damage &d) {
         return false;
     }
 
+    /* godma derives tau from shield/cap recharge time + multiplier attrs; bogus base time *or*
+     * zero multipliers flatten tau → Crucible GetChargeValue ZeroDivisionError while gauges tick. */
+    if (m_self->categoryID() == EVEDB::invCategories::Ship) {
+        ShipItem* const si(m_self->GetShipItem());
+        if (si != nullptr)
+            si->SanitizeSimulatorRechargeAttributes(); // cheap no-op once values are sane
+    }
+
     if (is_log_enabled(DAMAGE__MESSAGE)) {
         if (d.srcSE->IsNPCSE()) {
             _log(DAMAGE__MESSAGE, "%s(%u): Initializing %.2f damage from NPC %s(%u) with K:%.3f, T:%.3f, EM:%.3f, E:%.3f",\
@@ -173,6 +184,10 @@ bool SystemEntity::ApplyDamage(Damage &d) {
             else if (modifier > 0.3751f) { damageID = 2; } //glances off
             else if (modifier > 0.2501f) { damageID = 1; } //barely misses
             else                         { damageID = 0; } //misses completely
+            // Modifier is also the damage scaler (sig-res reduction, drone minimum graze). Values in
+            // (0, 0.25] became damageID 0 ("misses completely") while still applying HP loss — wrong UX.
+            if (modifier > 0.0f && damageID == 0)
+                damageID = 3; // barely scratches — any intentional non-zero hit packet
             _log(DAMAGE__TRACE, "%s(%u): Modifier: %.3f, damageID: %u.", GetName(), GetID(), modifier, damageID);
         } break;
     }
@@ -306,6 +321,8 @@ bool SystemEntity::ApplyDamage(Damage &d) {
         Killed(d);  // this must NOT remove dead SE from system.
         SystemEntity::Killed(d);    // this removes dead SE from system then deletes itemRef and all its contents
     } else {
+        if (total_damage > 0.0001f && damageID == 0)
+            damageID = 3;
         /**
          * ALL dmg msgs working  22Apr15 (hacked - found the actual msgIDs)
          * fixed msgIDs and removed xmlp  - 15Sept19
@@ -375,6 +392,9 @@ bool SystemEntity::ApplyDamage(Damage &d) {
         }
 
         SendDamageStateChanged();
+        /* Flush destiny queues so pooled OMAC (shield/armor) isn't stuck behind unrelated batched updates. */
+        if (HasPilot())
+            GetPilot()->FlushQueue();
     }
 
     if (sConfig.debug.UseProfiling)
@@ -395,6 +415,8 @@ void ShipSE::Killed(Damage &fatal_blow) {
     uint32 killerID = 0, locationID = GetLocationID();
     Client* pClient(nullptr);
     SystemEntity* killer(fatal_blow.srcSE);
+    double discordHullISK = 0;
+    double discordCargoISK = 0;
 
     if (killer->HasPilot()) {
         pClient = killer->GetPilot();
@@ -409,7 +431,10 @@ void ShipSE::Killed(Damage &fatal_blow) {
             killerID = pClient->GetCharacterID();
         }
     } else {
-        killerID = killer->GetID();
+        /* NPC / structure: itemID is not a character. Use the killer corp's CEO (NPC pilot in
+         * chrNPCCharacters / EveOwners) so Combat Details shows a name instead of #System. */
+        const uint32 kCorp = killer->GetCorporationID();
+        killerID = (kCorp != 0u) ? CorporationDB::GetCorporationCEO(kCorp) : 0u;
     }
 
     // AttrFwLpKill
@@ -467,7 +492,7 @@ void ShipSE::Killed(Damage &fatal_blow) {
 
         m_destiny->SendJettisonPacket();
         // wreck was created successfully.  drop loot and add to wreck.
-        DropLoot(wreckItemRef, m_self->groupID(), killerID);
+        DropLoot(wreckItemRef, m_self->groupID(), killerID, pClient != nullptr);
 
         return;
     }
@@ -495,18 +520,49 @@ void ShipSE::Killed(Damage &fatal_blow) {
     KillData data = KillData();
         data.solarSystemID = m_system->GetID();
         data.victimCharacterID = pPilot->GetCharacterID();
-        data.victimCorporationID = m_corpID;
-        data.victimAllianceID = m_allyID;
-        data.victimFactionID = m_warID;
+        const uint32 victimCorpID = pPilot->GetCorporationID();
+        data.victimCorporationID = victimCorpID;
+        /* Session alliance can be 0 while crpCorporation still has allianceID; backfill for killmail. */
+        data.victimAllianceID = pPilot->GetAllianceID();
+        if (data.victimAllianceID == 0) {
+            const uint32 allyDb = CorporationDB::GetCorporationAllianceID(victimCorpID);
+            if (allyDb != 0)
+                data.victimAllianceID = static_cast<int32>(allyDb);
+        }
+        /* Keep 0 for "no alliance". Storing -1 breaks Crucible CombatLog_CopyText / EveOwners lookups on double-click. */
+        data.victimFactionID = pPilot->GetWarFactionID();
+        if (data.victimFactionID == 0) {
+            uint32 fac = sDataMgr.GetCorpFaction(victimCorpID);
+            if (fac == 0)
+                fac = CorporationDB::GetCorporationWarFactionID(victimCorpID);
+            if (fac == 0)
+                fac = sDataMgr.GetRaceFaction(pPilot->GetChar()->race());
+            data.victimFactionID = static_cast<int32>(fac);
+        }
         data.victimShipTypeID = m_self->typeID();
 
         data.finalCharacterID = killerID;
         data.finalCorporationID = killer->GetCorporationID();
         data.finalAllianceID = killer->GetAllianceID();
-        data.finalFactionID = (killer->GetWarFactionID() > 500021 ? 500021 : killer->GetWarFactionID());
+        if (data.finalAllianceID == 0) {
+            const uint32 allyDb = CorporationDB::GetCorporationAllianceID(killer->GetCorporationID());
+            data.finalAllianceID = static_cast<int32>(allyDb);
+        }
+        int32 finalWar = killer->GetWarFactionID();
+        if (finalWar > 500021)
+            finalWar = 500021;
+        if (finalWar == 0) {
+            const uint32 kCorp = killer->GetCorporationID();
+            uint32 fac = sDataMgr.GetCorpFaction(kCorp);
+            if (fac == 0)
+                fac = CorporationDB::GetCorporationWarFactionID(kCorp);
+            finalWar = static_cast<int32>(fac);
+        }
+        data.finalFactionID = finalWar;
         data.finalShipTypeID = killer->GetTypeID();
-        data.finalWeaponTypeID = fatal_blow.weaponRef->typeID();
-        data.finalSecurityStatus = 0;   /* fix this */
+        data.finalWeaponTypeID = (fatal_blow.weaponRef.get() != nullptr)
+            ? static_cast<uint16>(fatal_blow.weaponRef->typeID()) : 0;
+        data.finalSecurityStatus = (pClient != nullptr) ? pClient->GetSecurityRating() : 0.0;
         data.finalDamageDone = fatal_blow.GetTotal();
 
         uint32 totalHP = m_self->GetAttribute(AttrHP).get_int();
@@ -542,6 +598,8 @@ void ShipSE::Killed(Damage &fatal_blow) {
         } else {
             uint32 s = 0, d = 0, x = 0;
             for (auto cur : deadShipInventory) {
+                if (cur.second->groupID() == EVEDB::invGroups::Character)
+                    continue; /* portrait / bloodline items (e.g. CharacterAmarr); not real ship cargo */
                 d = 0;
                 x = cur.second->quantity();
                 s = (cur.second->isSingleton() ? 1 : 0);
@@ -569,14 +627,62 @@ void ShipSE::Killed(Damage &fatal_blow) {
                 blob << " d=" << d << " x=" << x << "/>";
             }
         }
+
+        Inv::TypeData hullTd{};
+        discordHullISK = 0;
+        if (sDataMgr.HasType(static_cast<uint16>(m_self->typeID()))) {
+            sDataMgr.GetType(static_cast<uint16>(m_self->typeID()), hullTd);
+            discordHullISK = hullTd.basePrice;
+        }
+        discordCargoISK = 0;
+        for (auto cur : deadShipInventory) {
+            if (cur.second->groupID() == EVEDB::invGroups::Character)
+                continue;
+            if (!sDataMgr.HasType(cur.second->typeID()))
+                continue;
+            Inv::TypeData td{};
+            sDataMgr.GetType(cur.second->typeID(), td);
+            discordCargoISK += td.basePrice * static_cast<double>(cur.second->quantity());
+        }
+
         blob << "</items>";
     }
 
-    data.killBlob = blob.str().c_str();
-    data.killTime = GetFileTimeNow();
-    data.moonID = 0;
+    data.killBlob = blob.str();
+    data.killTime = static_cast<int64_t>(GetFileTimeNow());
+    /* Crucible killmail / CombatLog uses moonID as an EveLocations key; 0 is invalid and crashes Show Info. */
+    data.moonID = data.solarSystemID;
 
     pPilot->GetChar()->LogKill(data);
+
+    if (!pPilot->InPod()) {
+        std::string killerDisp;
+        if (pClient != nullptr) {
+            killerDisp = pClient->GetName();
+        } else if (killerID != 0u) {
+            Client* kc = sEntityList.FindClientByCharID(killerID);
+            if (kc != nullptr)
+                killerDisp = kc->GetCharName();
+            else
+                killerDisp = "Pilot #" + std::to_string(killerID);
+        } else {
+            killerDisp = "Unknown";
+        }
+
+        const char *shipNm = sDataMgr.GetTypeName(static_cast<uint16>(data.victimShipTypeID));
+        const std::string shipTypeName(shipNm != nullptr ? shipNm : "");
+
+        DiscordWebhook_NotifyExpensiveDeath(
+                pPilot->GetName(),
+                pPilot->GetCharacterID(),
+                shipTypeName,
+                m_system->GetID(),
+                m_system->GetNameStr(),
+                discordHullISK,
+                discordCargoISK,
+                killerDisp,
+                killerID);
+    }
 
     if (pPilot->InPod()) {
         // log podKill
@@ -653,7 +759,7 @@ void ShipSE::Killed(Damage &fatal_blow) {
             return;
         }
 
-        DropLoot(wreckItemRef, groupID, killerID);
+        DropLoot(wreckItemRef, groupID, killerID, pClient != nullptr);
 
         for (auto cur: survivedItems)
             cur->Move(wreckItemRef->itemID(), flagNone); // populate wreck with items that survived

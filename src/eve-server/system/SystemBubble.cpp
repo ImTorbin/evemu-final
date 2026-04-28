@@ -207,7 +207,7 @@ void SystemBubble::ProcessWander(std::vector<SystemEntity *> &wanderers) {
         }
 
         _log(DESTINY__TRACE, "SystemBubble::ProcessWander() checking if DSE in bubble");
-        if (!InBubble(pDSE->GetPosition())) {
+        if (!InBubble(pDSE->GetAuthPosition())) {
             wanderers.push_back(pDSE);
 
             _log(
@@ -291,11 +291,11 @@ void SystemBubble::Add(SystemEntity* pSE) {
         "SystemBubble::Add() - Adding entity %u to bubble %u.  Dist to center: %.2f",
         pSE->GetID(),
         m_bubbleID,
-        m_center.distance(pSE->GetPosition())
+        m_center.distance(pSE->GetAuthPosition())
     );
 
     if (is_log_enabled(DESTINY__BUBBLE_DEBUG)) {
-        GPoint startPoint( pSE->GetPosition() );
+        GPoint startPoint( pSE->GetAuthPosition() );
         GVector direction(startPoint, NULL_ORIGIN);
 
         double rangeToStar = direction.length();
@@ -975,9 +975,9 @@ void SystemBubble::SyncPos() {
             SetBallPosition du;
 
             du.entityID = dse.first;
-            du.x = dse.second->GetPosition().x;
-            du.y = dse.second->GetPosition().y;
-            du.z = dse.second->GetPosition().z;
+            du.x = dse.second->GetAuthPosition().x;
+            du.y = dse.second->GetAuthPosition().y;
+            du.z = dse.second->GetAuthPosition().z;
 
             PyTuple* up = du.Encode();
 

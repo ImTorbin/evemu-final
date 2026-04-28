@@ -67,7 +67,13 @@ namespace Agents {
             NeighboringConstellationSameRegion = 9,
             NeighboringConstellation = 10,
             NearestEnemyCombatZone = 11,
-            NearestCareerHub = 12
+            NearestCareerHub = 12,
+            /** EVEmu: BFS from agent, dropoff in same system or within 2 stargate jumps. */
+            WithinTwoJumpsOfAgent = 13,
+            /** EVEmu: 8–15 jumps, low-sec (below 0.5) or null-sec; fallback relaxes distance / sec. */
+            DistantLowSecEightToFifteenJumps = 14,
+            /** EVEmu: BFS from agent; station dropoff 1–13 stargate hops away (never same system as pickup). */
+            WithinThirteenJumpsOfAgent = 15
         };
     }
 
@@ -100,6 +106,14 @@ namespace Agents {
             Military    = 3,
             Exploration = 4,
             AdvMilitary = 5
+        };
+    }
+
+    /** Values match `agtAgents.divisionID` / corp division (subset used server-side). */
+    namespace Division {
+        enum : uint8 {
+            Mining    = 14,
+            MiningNew = 23,
         };
     }
 

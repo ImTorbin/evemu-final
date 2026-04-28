@@ -28,6 +28,7 @@
 
 #include "Client.h"
 #include "EntityList.h"
+#include "system/TargetManager.h"
 #include "StaticDataMgr.h"
 #include "cache/ObjCacheService.h"
 #include "fleet/FleetService.h"
@@ -154,6 +155,10 @@ bool BeyonceBound::CanIssueWarp(Client* issuer)
 
     /** @todo (allan) finish warp scramble system */
     // >0 means ship cannot warp (warp stabs are neg values, warp scrams are pos values)
+    if (SystemEntity* issuerSE = issuer->GetShipSE())
+        if (issuerSE->TargetMgr() != nullptr)
+            // Stale attr with no tackler in grid range caused permanent "warp scrambled".
+            issuerSE->TargetMgr()->ClearStaleWarpScramble(500000.0);
     ShipItemRef issuerShip = issuer->GetShip();
     if (issuerShip && issuerShip->GetAttribute(AttrWarpScrambleStatus) > 0)
         throw UserError("WarpScrambled");
@@ -568,6 +573,7 @@ PyResult BeyonceBound::CmdWarpToStuff(PyCallArgs &call, PyString* type, PyRep* i
     double radius(0);
     uint32 toID(0);
     std::string stringArg = "";
+    bool positionOnlyWarp(false);
 
     if ((id->IsString())
     or  (id->IsWString())) {
@@ -611,8 +617,21 @@ PyResult BeyonceBound::CmdWarpToStuff(PyCallArgs &call, PyString* type, PyRep* i
             }
         }
     } else if (type->content() == "scan") {
-        uint32 anomID = pSystem->GetAnomMgr()->GetAnomalyID(stringArg);
-        pSE = pSystem->GetSE(anomID);
+        // Client may send signature id (e.g. "ABC-123") or the cosmic item's entity id as an integer.
+        uint32 anomID(0);
+        if (not stringArg.empty())
+            anomID = pSystem->GetAnomMgr()->GetAnomalyID(stringArg);
+        if (anomID != 0)
+            pSE = pSystem->GetSE(anomID);
+        if (pSE == nullptr && toID != 0)
+            pSE = pSystem->GetSE(toID);
+        if (pSE == nullptr && not stringArg.empty()) {
+            warpToPoint = pSystem->GetAnomMgr()->GetAnomalyPos(stringArg);
+            if (not warpToPoint.isZero()) {
+                positionOnlyWarp = true;
+                radius = 40000.0;
+            }
+        }
     } else if (type->content() == "launch") {
         //warpToPoint = PlanetDB::GetLaunchPos(toID);
         pSE = pSystem->GetSE(toID);
@@ -768,10 +787,16 @@ PyResult BeyonceBound::CmdWarpToStuff(PyCallArgs &call, PyString* type, PyRep* i
             GPoint stopPoint = (vectorFromOrigin * radius);
             warpToPoint -= stopPoint;
         }
+    } else if (positionOnlyWarp && not warpToPoint.isZero()) {
+        if (radius < 90000) {
+            GVector vectorFromOrigin(call.client->GetShipSE()->GetPosition(), warpToPoint);
+            vectorFromOrigin.normalize();
+            warpToPoint -= (vectorFromOrigin * radius);
+        }
     }
     if (warpToPoint.isZero()) {
-        // point is zero ....make error and return
-        codelog(CLIENT__ERROR, "%s: warpToPoint.isZero() = true.  Cannot find location %u for '%s'", call.client->GetName(), toID, type->content().c_str());
+        codelog(CLIENT__ERROR, "%s: warpToPoint.isZero() = true.  type=%s toID=%u stringArg=%s",
+            call.client->GetName(), type->content().c_str(), toID, stringArg.c_str());
         call.client->SendErrorMsg("WarpTo: Item location not found.");
         return PyStatic.NewNone();
     }

@@ -69,9 +69,10 @@ PyResult Standing::GetNPCNPCStandings(PyCallArgs &call) {
 
 PyResult Standing::GetSecurityRating(PyCallArgs &call, PyInt* ownerID) {
     CharacterRef cRef = sItemFactory.GetCharacterRef(ownerID->value());
-    if  (cRef.get() == nullptr) {
-        _log(STANDING__WARNING, "Character %u not found.", ownerID->value());
-        return nullptr;
+    if (cRef.get() == nullptr) {
+        // Mission agents / NPCs are not Character items; client formatters expect a float, not None.
+        _log(STANDING__WARNING, "Character %u not loaded as item; returning 0.0 sec status.", ownerID->value());
+        return new PyFloat(0.0);
     }
 
     return new PyFloat( cRef->GetSecurityRating() );

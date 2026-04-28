@@ -50,6 +50,7 @@ EVEServerConfig::EVEServerConfig()
     server.NoobShipCheck = true;
     server.ServerSleepTime = 10 /*ms*/;
     server.idleSleepTime = 1000;
+    server.DynamicDestinyMs = 17; // ~60 Hz (1000/60≈16.7ms; int ms); smoother NPC/drone motion for observers
     server.DisableIGB = true;
     server.MaxThreadReport = 20;
     server.ModuleAutoOff = false;
@@ -66,7 +67,7 @@ EVEServerConfig::EVEServerConfig()
 
     // world
     world.chatLogs = false;//N
-    world.globalChat = true;//N
+    world.globalChat = true;  // LSC: auto-join EVE Global on login (see LSCService::CharacterLogin)
     world.gridUnload = true;
     world.gridUnloadTime = 300 /*s*/; // 5 mins
     world.loginInfo = false;//N
@@ -141,7 +142,7 @@ EVEServerConfig::EVEServerConfig()
     account.loginMessage = "";
 
     // character
-    character.startBalance = 6666000000.0f;
+    character.startBalance = 10000000.0;  // 10M ISK for new characters (inheritance transfer)
     character.startAurBalance = 60000.0f;
     character.startStation = 0;
     character.startSecRating = 0.0;
@@ -166,6 +167,7 @@ EVEServerConfig::EVEServerConfig()
     npc.UseDamageMultiplier = true;
     npc.DefenderMissileChance = 0.0;
     npc.LootDropChance = 0.75;
+    npc.EngagedUseOrbit = false;
 
     // cosmic
     cosmic.PIEnabled = false;
@@ -187,6 +189,9 @@ EVEServerConfig::EVEServerConfig()
     exploring.Radar = 6;
     exploring.Unrated = 8;
     exploring.Complex = 4;
+    exploring.EscalationChance = 0.35f;
+    exploring.AnomalyCombatWaves = 12; /* cap for scripted anomaly waves (Hideaway–Sanctum); clamped 1–12 in DungeonMgr */
+    exploring.AnomalyCommanderChance = 0.25f;
 
     // standings
     //  - mission
@@ -241,6 +246,16 @@ EVEServerConfig::EVEServerConfig()
     debug.AnomalyFaction = 0;
     debug.ProfileTraceTime = 150/*ms*/;
 
+    discord.enabled = false;
+    discord.webhookRareLootURL.clear();
+    discord.webhookExpensiveDeathURL.clear();
+    discord.webhookServerUpURL.clear();
+    discord.rareLootMetaGt = 5; /* faction / deadspace / officer mods typically meta > 5 */
+    discord.minExpensiveDeathEstimatedISK = 500e6;
+    discord.cooldownRareLootSeconds = 30;
+    discord.cooldownExpensiveDeathSeconds = 60;
+    discord.lootOnlyPlayerShipKills = false;
+
     // database
     database.host = "localhost";
     database.port = 3306;
@@ -263,6 +278,7 @@ EVEServerConfig::EVEServerConfig()
 
     // net
     net.port = 26000;
+    net.listenAddress.clear();
     net.imageServer = "localhost";
     net.imageServerPort = 26001;
 
@@ -297,6 +313,7 @@ bool EVEServerConfig::ProcessEveServer( const TiXmlElement* ele )
     AddMemberParser( "net",         &EVEServerConfig::ProcessNet );
     AddMemberParser( "testing",     &EVEServerConfig::ProcessTesting );
     AddMemberParser( "threads",     &EVEServerConfig::ProcessThreads );
+    AddMemberParser( "discord",     &EVEServerConfig::ProcessDiscord );
 
     // parse the element
     const bool result = ParseElementChildren( ele );
@@ -322,6 +339,7 @@ bool EVEServerConfig::ProcessEveServer( const TiXmlElement* ele )
     RemoveParser( "net" );
     RemoveParser( "testing" );
     RemoveParser( "threads" );
+    RemoveParser( "discord" );
 
     // return status of parsing
     return result;
@@ -336,6 +354,7 @@ bool EVEServerConfig::ProcessServer( const TiXmlElement* ele )
     AddValueParser( "BulkDataOD",           server.BulkDataOD );
     AddValueParser( "ServerSleepTime",      server.ServerSleepTime );
     AddValueParser( "idleSleepTime",        server.idleSleepTime );
+    AddValueParser( "DynamicDestinyMs",      server.DynamicDestinyMs );
     AddValueParser( "MaxThreadReport",      server.MaxThreadReport );
     AddValueParser( "ModuleAutoOff",        server.ModuleAutoOff );
     AddValueParser( "ModuleDamageChance",   server.ModuleDamageChance );
@@ -358,6 +377,7 @@ bool EVEServerConfig::ProcessServer( const TiXmlElement* ele )
     RemoveParser( "BulkDataOD" );
     RemoveParser( "ServerSleepTime" );
     RemoveParser( "idleSleepTime" );
+    RemoveParser( "DynamicDestinyMs" );
     RemoveParser( "MaxThreadReport" );
     RemoveParser( "ModuleAutoOff" );
     RemoveParser( "ModuleDamageChance" );
@@ -600,6 +620,7 @@ bool EVEServerConfig::ProcessNPC( const TiXmlElement* ele )
     AddValueParser( "UseDamageMultiplier",      npc.UseDamageMultiplier );
     AddValueParser( "LootDropChance",           npc.LootDropChance );
     AddValueParser( "DefenderMissileChance",    npc.DefenderMissileChance );
+    AddValueParser( "EngagedUseOrbit",          npc.EngagedUseOrbit );
 
     const bool result = ParseElementChildren( ele );
 
@@ -618,6 +639,7 @@ bool EVEServerConfig::ProcessNPC( const TiXmlElement* ele )
     RemoveParser( "UseDamageMultiplier" );
     RemoveParser( "LootDropChance" );
     RemoveParser( "DefenderMissileChance" );
+    RemoveParser( "EngagedUseOrbit" );
 
     return result;
 }
@@ -676,12 +698,14 @@ bool EVEServerConfig::ProcessNet( const TiXmlElement* ele )
 {
     AddValueParser( "port",             net.port );
     AddValueParser( "imageServerPort",  net.imageServerPort);
+    AddValueParser( "listenAddress",    net.listenAddress);
     AddValueParser( "imageServer",      net.imageServer);
 
     const bool result = ParseElementChildren( ele );
 
     RemoveParser( "port" );
     RemoveParser( "imageServerPort" );
+    RemoveParser( "listenAddress" );
     RemoveParser( "imageServer" );
 
     return result;
@@ -744,6 +768,9 @@ bool EVEServerConfig::ProcessExploring ( const TiXmlElement* ele ) {
     AddValueParser( "Complex",              exploring.Complex );
     AddValueParser( "Gravametric",          exploring.Gravametric );
     AddValueParser( "Magnetometric",        exploring.Magnetometric );
+    AddValueParser( "EscalationChance",     exploring.EscalationChance );
+    AddValueParser( "AnomalyCombatWaves",   exploring.AnomalyCombatWaves );
+    AddValueParser( "AnomalyCommanderChance", exploring.AnomalyCommanderChance );
 
     const bool result = ParseElementChildren( ele );
 
@@ -753,6 +780,9 @@ bool EVEServerConfig::ProcessExploring ( const TiXmlElement* ele ) {
     RemoveParser( "Complex" );
     RemoveParser( "Gravametric" );
     RemoveParser( "Magnetometric" );
+    RemoveParser( "EscalationChance" );
+    RemoveParser( "AnomalyCombatWaves" );
+    RemoveParser( "AnomalyCommanderChance" );
 
     return result;
 }
@@ -880,6 +910,33 @@ bool EVEServerConfig::ProcessTesting(const TiXmlElement* ele)
     RemoveParser( "ShipHeat" );
     RemoveParser( "EnableDrones" );
     RemoveParser( "EnableSharedCaptainsQuarters" );
+
+    return result;
+}
+
+bool EVEServerConfig::ProcessDiscord(const TiXmlElement* ele)
+{
+    AddValueParser( "enabled",                      discord.enabled );
+    AddValueParser( "webhookRareLootURL",          discord.webhookRareLootURL );
+    AddValueParser( "webhookExpensiveDeathURL",    discord.webhookExpensiveDeathURL );
+    AddValueParser( "webhookServerUpURL",         discord.webhookServerUpURL );
+    AddValueParser( "rareLootMetaGt",              discord.rareLootMetaGt );
+    AddValueParser( "minExpensiveDeathEstimatedISK", discord.minExpensiveDeathEstimatedISK );
+    AddValueParser( "cooldownRareLootSeconds",     discord.cooldownRareLootSeconds );
+    AddValueParser( "cooldownExpensiveDeathSeconds", discord.cooldownExpensiveDeathSeconds );
+    AddValueParser( "lootOnlyPlayerShipKills",     discord.lootOnlyPlayerShipKills );
+
+    const bool result = ParseElementChildren( ele );
+
+    RemoveParser( "enabled" );
+    RemoveParser( "webhookRareLootURL" );
+    RemoveParser( "webhookExpensiveDeathURL" );
+    RemoveParser( "webhookServerUpURL" );
+    RemoveParser( "rareLootMetaGt" );
+    RemoveParser( "minExpensiveDeathEstimatedISK" );
+    RemoveParser( "cooldownRareLootSeconds" );
+    RemoveParser( "cooldownExpensiveDeathSeconds" );
+    RemoveParser( "lootOnlyPlayerShipKills" );
 
     return result;
 }

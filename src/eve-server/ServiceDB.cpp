@@ -25,11 +25,81 @@
 */
 
 #include <boost/algorithm/string.hpp>
+#include <cmath>
+#include <map>
+#include <string>
+#include <vector>
 #include "eve-server.h"
 
 #include "EntityList.h"
 #include "EVEServerConfig.h"
+#include "../eve-common/EVE_Agent.h"
 #include "ServiceDB.h"
+
+namespace {
+/** Hand-tuned CQ floor spots (Crucible Amarr quarters); first N agents use these in order. */
+static constexpr struct {
+    double x, y, z;
+    float yaw;
+} kCQMissionAgentSlots[] = {
+    { 1.3350, 0.0019, -2.4842, 5.472f },
+    { 2.768, -0.001, 1.402, 3.141f },
+    { 7.393, -0.498, -1.959, 0.733f },
+    { 1.031, -0.001, -2.686, 5.565f },
+    { -0.350, 0.000, -3.924, 0.197f },
+};
+static constexpr unsigned kCQMissionAgentSlotCount = sizeof(kCQMissionAgentSlots) / sizeof(kCQMissionAgentSlots[0]);
+
+constexpr double kCQLayoutEpsPos = 1e-4;
+constexpr float kCQLayoutEpsYaw = 1e-3f;
+
+static bool CQMissionAgentLayoutClose(double a, double b) {
+    return std::fabs(a - b) < kCQLayoutEpsPos;
+}
+
+static bool CQMissionAgentYawClose(float a, float b) {
+    return std::fabs(a - b) < kCQLayoutEpsYaw;
+}
+
+/** Legacy arc along the room; used for agents beyond kCQMissionAgentSlotCount. */
+static void CQMissionAgentLayoutArc(unsigned index, unsigned total, double& x, double& y, double& z, float& yaw)
+{
+    constexpr double kPi = 3.14159265358979323846;
+    y = 0.248;
+    if (total == 0) {
+        x = z = 0.0;
+        yaw = 0.826088f;
+        return;
+    }
+    const double cx = 0.15;
+    const double cz = 4.05;
+    const double R = 2.35;
+    const double theta0 = 64.0 * kPi / 180.0;
+    const double theta1 = 116.0 * kPi / 180.0;
+    const double t = (total <= 1) ? 0.5 : static_cast<double>(index) / static_cast<double>(total - 1);
+    const double theta = theta0 + (theta1 - theta0) * t;
+    x = cx + R * std::sin(theta);
+    z = cz + R * std::cos(theta);
+    const float fx = static_cast<float>(cx - x);
+    const float fz = static_cast<float>(cz - z);
+    yaw = std::atan2(fx, fz);
+}
+
+/** Positions for mission CQ agents: predefined slots first, then arc. DB yaw gets +pi on wire (CQManager). */
+static void CQMissionAgentLayoutSlot(unsigned index, unsigned total, double& x, double& y, double& z, float& yaw)
+{
+    if (index < kCQMissionAgentSlotCount) {
+        x = kCQMissionAgentSlots[index].x;
+        y = kCQMissionAgentSlots[index].y;
+        z = kCQMissionAgentSlots[index].z;
+        yaw = kCQMissionAgentSlots[index].yaw;
+        return;
+    }
+    const unsigned arcTotal = (total > kCQMissionAgentSlotCount) ? (total - kCQMissionAgentSlotCount) : 1u;
+    const unsigned arcIndex = index - kCQMissionAgentSlotCount;
+    CQMissionAgentLayoutArc(arcIndex, arcTotal, x, y, z, yaw);
+}
+} // namespace
 
 uint32 ServiceDB::SetClientSeed()
 {
@@ -704,16 +774,504 @@ void ServiceDB::GetCorpHangarNames(uint32 corpID, std::map<uint8, std::string> &
     }
 }
 
-void ServiceDB::SaveKillOrLoss(KillData &data) {
+uint32 ServiceDB::CQInstanceCharIDFromAgentID(uint32 agentID) {
+    return 0xC0000000u + (agentID & 0x0FFFFFFFu);
+}
+
+bool ServiceDB::CQAgentIDFromInstanceCharID(uint32 instanceCharID, uint32& outAgentID) {
+    if ((instanceCharID & 0xF0000000u) != 0xC0000000u) {
+        return false;
+    }
+    outAgentID = instanceCharID - 0xC0000000u;
+    return outAgentID != 0; // agentID 0 is invalid
+}
+
+void ServiceDB::GetCQCustomAgentsForStation(uint32 stationID, std::vector<CQCustomAgentRow>& into) {
+    into.clear();
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT ca.agentID, ca.missionAgentID, ca.appearanceCharID, ca.posX, ca.posY, ca.posZ, ca.yaw,"
+        "  COALESCE(agt.corporationID, chapp.corporationID, 0),"
+        "  IF(ca.appearanceCharID > 0 AND ca.missionAgentID > 0 AND ca.appearanceCharID != ca.missionAgentID,"
+        "     chapp.gender, COALESCE(chNPC.gender, chapp.gender, 0)),"
+        "  IF(ca.appearanceCharID > 0 AND ca.missionAgentID > 0 AND ca.appearanceCharID != ca.missionAgentID,"
+        "     chapp.bloodlineID, COALESCE(bl.bloodlineID, chapp.bloodlineID, 0)),"
+        "  IF(ca.appearanceCharID > 0 AND ca.missionAgentID > 0 AND ca.appearanceCharID != ca.missionAgentID,"
+        "     chapp.raceID, COALESCE(chapp.raceID, 0))"
+        " FROM staCQCustomAgents ca"
+        "  LEFT JOIN agtAgents agt ON agt.agentID = ca.missionAgentID"
+        "  LEFT JOIN chrNPCCharacters chNPC ON chNPC.characterID = ca.missionAgentID"
+        "  LEFT JOIN bloodlineTypes bl ON bl.typeID = chNPC.typeID"
+        "  LEFT JOIN chrCharacters chapp ON chapp.characterID = ca.appearanceCharID"
+        " WHERE ca.stationID = %u AND ca.enabled = 1"
+        " ORDER BY ca.agentID ASC",
+        stationID))
+    {
+        _log(DATABASE__ERROR, "GetCQCustomAgentsForStation: %s", res.error.c_str());
+        return;
+    }
+    DBResultRow row;
+    while (res.GetRow(row)) {
+        CQCustomAgentRow r;
+        r.agentID = row.GetUInt(0);
+        r.missionAgentID = row.IsNull(1) ? 0 : row.GetUInt(1);
+        r.appearanceCharID = row.GetUInt(2);
+        r.posX = row.GetDouble(3);
+        r.posY = row.GetDouble(4);
+        r.posZ = row.GetDouble(5);
+        r.yaw = static_cast<float>(row.GetDouble(6));
+        r.corporationID = row.GetUInt(7);
+        r.genderID = static_cast<uint8>(row.GetUInt(8));
+        r.bloodlineID = row.GetUInt(9);
+        r.raceID = row.GetUInt(10);
+        r.instanceCharID = CQInstanceCharIDFromAgentID(r.agentID);
+        into.push_back(r);
+    }
+}
+
+bool ServiceDB::EnsureRandomMissionAgentPaperDollInDb(uint32 missionAgentCharID)
+{
+    DBQueryResult res;
+    DBResultRow row;
+
+    if (!sDatabase.RunQuery(res,
+        "SELECT 1 FROM agtAgents WHERE agentID=%u AND isLocator=0 AND agentTypeID=%u LIMIT 1",
+        missionAgentCharID, static_cast<unsigned>(Agents::Type::Basic)))
+    {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: agent check: %s", res.error.c_str());
+        return false;
+    }
+    if (!res.GetRow(row)) {
+        return false;
+    }
+
+    if (!sDatabase.RunQuery(res,
+        "SELECT 1 FROM avatar_modifiers WHERE charID=%u LIMIT 1",
+        missionAgentCharID))
+    {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: modifiers check: %s", res.error.c_str());
+        return false;
+    }
+    if (res.GetRow(row)) {
+        return false;
+    }
+
+    uint32 tpl = 0;
+    if (!sDatabase.RunQuery(res,
+        "SELECT c.characterID FROM chrCharacters AS c "
+        "INNER JOIN avatars AS a ON a.charID = c.characterID "
+        "WHERE EXISTS (SELECT 1 FROM avatar_modifiers AS m WHERE m.charID = c.characterID) "
+        "AND c.characterID <> %u "
+        "AND c.gender = (SELECT n.gender FROM chrNPCCharacters AS n WHERE n.characterID = %u LIMIT 1) "
+        "ORDER BY RAND() LIMIT 1",
+        missionAgentCharID, missionAgentCharID))
+    {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: template (gender): %s", res.error.c_str());
+        return false;
+    }
+    if (!res.GetRow(row)) {
+        if (!sDatabase.RunQuery(res,
+            "SELECT c.characterID FROM chrCharacters AS c "
+            "INNER JOIN avatars AS a ON a.charID = c.characterID "
+            "WHERE EXISTS (SELECT 1 FROM avatar_modifiers AS m WHERE m.charID = c.characterID) "
+            "AND c.characterID <> %u "
+            "ORDER BY RAND() LIMIT 1",
+            missionAgentCharID))
+        {
+            _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: template (any): %s", res.error.c_str());
+            return false;
+        }
+        if (!res.GetRow(row)) {
+            _log(DATABASE__MESSAGE, "EnsureRandomMissionAgentPaperDollInDb: no dressed chrCharacters template for agent %u",
+                missionAgentCharID);
+            return false;
+        }
+    }
+    tpl = row.GetUInt(0);
+
     DBerror err;
-    sDatabase.RunQuery(err,
+    uint32 affected = 0;
+    if (!sDatabase.RunQuery(err, affected, "DELETE FROM avatar_colors WHERE charID=%u", missionAgentCharID)) {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: %s", err.c_str());
+        return false;
+    }
+    if (!sDatabase.RunQuery(err, affected, "DELETE FROM avatar_modifiers WHERE charID=%u", missionAgentCharID)) {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: %s", err.c_str());
+        return false;
+    }
+    if (!sDatabase.RunQuery(err, affected, "DELETE FROM avatar_sculpts WHERE charID=%u", missionAgentCharID)) {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: %s", err.c_str());
+        return false;
+    }
+    if (!sDatabase.RunQuery(err, affected, "DELETE FROM chrPortraitData WHERE charID=%u", missionAgentCharID)) {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: %s", err.c_str());
+        return false;
+    }
+    if (!sDatabase.RunQuery(err, affected, "DELETE FROM avatars WHERE charID=%u", missionAgentCharID)) {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: %s", err.c_str());
+        return false;
+    }
+
+    if (!sDatabase.RunQuery(err, affected,
+        "INSERT INTO avatars (charID, hairDarkness) SELECT %u, t.hairDarkness FROM avatars t WHERE t.charID=%u LIMIT 1",
+        missionAgentCharID, tpl))
+    {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: insert avatars: %s", err.c_str());
+        return false;
+    }
+    if (affected == 0) {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: insert avatars affected 0 (tpl=%u)", tpl);
+        return false;
+    }
+
+    if (!sDatabase.RunQuery(err, affected,
+        "INSERT INTO avatar_colors (charID, colorID, colorNameA, colorNameBC, weight, gloss) "
+        "SELECT %u, c.colorID, c.colorNameA, c.colorNameBC, c.weight, c.gloss FROM avatar_colors c WHERE c.charID=%u",
+        missionAgentCharID, tpl))
+    {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: insert avatar_colors: %s", err.c_str());
+        return false;
+    }
+    if (!sDatabase.RunQuery(err, affected,
+        "INSERT INTO avatar_modifiers (charID, modifierLocationID, paperdollResourceID, paperdollResourceVariation) "
+        "SELECT %u, m.modifierLocationID, m.paperdollResourceID, m.paperdollResourceVariation "
+        "FROM avatar_modifiers m WHERE m.charID=%u",
+        missionAgentCharID, tpl))
+    {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: insert avatar_modifiers: %s", err.c_str());
+        return false;
+    }
+    if (!sDatabase.RunQuery(err, affected,
+        "INSERT INTO avatar_sculpts (charID, sculptLocationID, weightUpDown, weightLeftRight, weightForwardBack) "
+        "SELECT %u, s.sculptLocationID, s.weightUpDown, s.weightLeftRight, s.weightForwardBack "
+        "FROM avatar_sculpts s WHERE s.charID=%u",
+        missionAgentCharID, tpl))
+    {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: insert avatar_sculpts: %s", err.c_str());
+        return false;
+    }
+
+    if (!sDatabase.RunQuery(err, affected,
+        "INSERT INTO chrPortraitData ("
+        " charID, backgroundID, lightID, lightColorID, cameraX, cameraY, cameraZ,"
+        " cameraPoiX, cameraPoiY, cameraPoiZ, headLookTargetX, headLookTargetY, headLookTargetZ,"
+        " lightIntensity, headTilt, orientChar, browLeftCurl, browLeftTighten, browLeftUpDown,"
+        " browRightCurl, browRightTighten, browRightUpDown, eyeClose, eyesLookVertical, eyesLookHorizontal,"
+        " squintLeft, squintRight, jawSideways, jawUp, puckerLips, frownLeft, frownRight,"
+        " smileLeft, smileRight, cameraFieldOfView, portraitPoseNumber)"
+        " SELECT %u,"
+        " p.backgroundID, p.lightID, p.lightColorID, p.cameraX, p.cameraY, p.cameraZ,"
+        " p.cameraPoiX, p.cameraPoiY, p.cameraPoiZ, p.headLookTargetX, p.headLookTargetY, p.headLookTargetZ,"
+        " p.lightIntensity, p.headTilt, p.orientChar, p.browLeftCurl, p.browLeftTighten, p.browLeftUpDown,"
+        " p.browRightCurl, p.browRightTighten, p.browRightUpDown, p.eyeClose, p.eyesLookVertical, p.eyesLookHorizontal,"
+        " p.squintLeft, p.squintRight, p.jawSideways, p.jawUp, p.puckerLips, p.frownLeft, p.frownRight,"
+        " p.smileLeft, p.smileRight, p.cameraFieldOfView, p.portraitPoseNumber"
+        " FROM chrPortraitData p WHERE p.charID=%u",
+        missionAgentCharID, tpl))
+    {
+        _log(DATABASE__ERROR, "EnsureRandomMissionAgentPaperDollInDb: insert chrPortraitData: %s", err.c_str());
+        return false;
+    }
+
+    _log(DATABASE__MESSAGE, "CQ: persisted random paper doll for mission agent %u from template %u", missionAgentCharID, tpl);
+    return true;
+}
+
+void ServiceDB::EnsureCQMissionAgentSpawnsForStation(uint32 stationID, bool* outLayoutChanged)
+{
+    if (outLayoutChanged != nullptr) {
+        *outLayoutChanged = false;
+    }
+
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT agt.agentID, COALESCE(chr.characterName, CONCAT('Agent ', agt.agentID))"
+        " FROM agtAgents AS agt"
+        " INNER JOIN chrNPCCharacters AS chr ON chr.characterID = agt.agentID"
+        " INNER JOIN staStations AS st ON st.stationID = agt.locationID"
+        " WHERE agt.locationID = %u AND agt.isLocator = 0 AND agt.agentTypeID = %u"
+        " ORDER BY agt.agentID ASC",
+        stationID, static_cast<unsigned>(Agents::Type::Basic)))
+    {
+        _log(DATABASE__ERROR, "EnsureCQMissionAgentSpawnsForStation: %s", res.error.c_str());
+        return;
+    }
+
+    std::vector<std::pair<uint32, std::string>> agents;
+    DBResultRow row;
+    while (res.GetRow(row)) {
+        agents.emplace_back(row.GetUInt(0), row.GetText(1));
+    }
+
+    const unsigned N = static_cast<unsigned>(agents.size());
+    if (N == 0) {
+        return;
+    }
+
+    for (unsigned i = 0; i < N; ++i) {
+        const uint32 aid = agents[i].first;
+        std::string name = agents[i].second;
+        if (name.empty()) {
+            name = "Agent " + std::to_string(aid);
+        }
+
+        DBQueryResult resExist;
+        if (!sDatabase.RunQuery(resExist,
+            "SELECT agentID FROM staCQCustomAgents WHERE stationID=%u AND missionAgentID=%u AND enabled=1 LIMIT 1",
+            stationID, aid))
+        {
+            _log(DATABASE__ERROR, "EnsureCQMissionAgentSpawnsForStation EXISTS: %s", resExist.error.c_str());
+            continue;
+        }
+        DBResultRow existRow;
+        if (resExist.GetRow(existRow)) {
+            continue;
+        }
+
+        double px, py, pz;
+        float pyaw;
+        CQMissionAgentLayoutSlot(i, N, px, py, pz, pyaw);
+
+        std::string nameEsc;
+        sDatabase.DoEscapeString(nameEsc, name.c_str());
+
+        DBerror err;
+        uint32 rowLid = 0;
+        if (!sDatabase.RunQueryLID(err, rowLid,
+            "INSERT INTO staCQCustomAgents (stationID, missionAgentID, appearanceCharID, posX, posY, posZ, yaw, label, enabled, createdAt, updatedAt)"
+            " VALUES (%u, %u, 0, %f, %f, %f, %f, '%s', 1, UNIX_TIMESTAMP(CURRENT_TIMESTAMP), UNIX_TIMESTAMP(CURRENT_TIMESTAMP))",
+            stationID, aid, px, py, pz, static_cast<double>(pyaw), nameEsc.c_str()))
+        {
+            _log(DATABASE__ERROR, "EnsureCQMissionAgentSpawnsForStation INSERT: %s", err.c_str());
+            continue;
+        }
+        if (outLayoutChanged != nullptr) {
+            *outLayoutChanged = true;
+        }
+        (void)rowLid;
+    }
+
+    DBQueryResult resPos;
+    if (!sDatabase.RunQuery(resPos,
+        "SELECT missionAgentID, posX, posY, posZ, yaw FROM staCQCustomAgents"
+        " WHERE stationID=%u AND missionAgentID IS NOT NULL AND enabled=1",
+        stationID))
+    {
+        _log(DATABASE__ERROR, "EnsureCQMissionAgentSpawnsForStation positions: %s", resPos.error.c_str());
+        return;
+    }
+
+    struct CurTransform {
+        double x, y, z;
+        float yaw;
+    };
+    std::map<uint32, CurTransform> curByMission;
+    while (resPos.GetRow(row)) {
+        CurTransform ct;
+        ct.x = row.GetDouble(1);
+        ct.y = row.GetDouble(2);
+        ct.z = row.GetDouble(3);
+        ct.yaw = static_cast<float>(row.GetDouble(4));
+        curByMission[row.GetUInt(0)] = ct;
+    }
+
+    for (unsigned i = 0; i < N; ++i) {
+        const uint32 aid = agents[i].first;
+        double px, py, pz;
+        float pyaw;
+        CQMissionAgentLayoutSlot(i, N, px, py, pz, pyaw);
+
+        auto it = curByMission.find(aid);
+        if (it == curByMission.end()) {
+            continue;
+        }
+        const CurTransform& c = it->second;
+        if (CQMissionAgentLayoutClose(c.x, px) && CQMissionAgentLayoutClose(c.y, py)
+            && CQMissionAgentLayoutClose(c.z, pz) && CQMissionAgentYawClose(c.yaw, pyaw)) {
+            continue;
+        }
+
+        DBerror err;
+        uint32 affected = 0;
+        if (!sDatabase.RunQuery(err, affected,
+            "UPDATE staCQCustomAgents SET posX=%f, posY=%f, posZ=%f, yaw=%f, updatedAt=UNIX_TIMESTAMP(CURRENT_TIMESTAMP)"
+            " WHERE stationID=%u AND missionAgentID=%u AND enabled=1",
+            px, py, pz, static_cast<double>(pyaw), stationID, aid))
+        {
+            _log(DATABASE__ERROR, "EnsureCQMissionAgentSpawnsForStation reposition: %s", err.c_str());
+            continue;
+        }
+        if (affected > 0 && outLayoutChanged != nullptr) {
+            *outLayoutChanged = true;
+        }
+    }
+
+    for (unsigned i = 0; i < N; ++i) {
+        if (EnsureRandomMissionAgentPaperDollInDb(agents[i].first) && outLayoutChanged != nullptr) {
+            *outLayoutChanged = true;
+        }
+    }
+}
+
+bool ServiceDB::InsertCQCustomAgent(uint32 stationID, uint32 appearanceCharID, double x, double y, double z, float yaw, const std::string& label, uint32& outInstanceCharID) {
+    outInstanceCharID = 0;
+    std::string labelEsc;
+    sDatabase.DoEscapeString(labelEsc, label.c_str());
+    DBerror err;
+    uint32 rowLid = 0;
+    if (!sDatabase.RunQueryLID(err, rowLid,
+        "INSERT INTO staCQCustomAgents (stationID, appearanceCharID, posX, posY, posZ, yaw, label, enabled, createdAt, updatedAt)"
+        " VALUES (%u, %u, %f, %f, %f, %f, '%s', 1, UNIX_TIMESTAMP(CURRENT_TIMESTAMP), UNIX_TIMESTAMP(CURRENT_TIMESTAMP))",
+        stationID, appearanceCharID, x, y, z, static_cast<double>(yaw), labelEsc.c_str())) {
+        _log(DATABASE__ERROR, "InsertCQCustomAgent: %s", err.c_str());
+        return false;
+    }
+    outInstanceCharID = CQInstanceCharIDFromAgentID(rowLid);
+    return true;
+}
+
+bool ServiceDB::UpdateCQCustomAgentTransformByInstance(uint32 instanceCharID, double x, double y, double z, float yaw) {
+    uint32 agentID = 0;
+    if (!GetCQTableAgentIdFromProtocolId(instanceCharID, agentID)) {
+        return false;
+    }
+    DBerror err;
+    uint32 affected = 0;
+    if (!sDatabase.RunQuery(err, affected,
+        "UPDATE staCQCustomAgents SET posX=%f, posY=%f, posZ=%f, yaw=%f, updatedAt=UNIX_TIMESTAMP(CURRENT_TIMESTAMP) WHERE agentID=%u",
+        x, y, z, static_cast<double>(yaw), agentID)) {
+        _log(DATABASE__ERROR, "UpdateCQCustomAgentTransformByInstance: %s", err.c_str());
+        return false;
+    }
+    return affected > 0;
+}
+
+bool ServiceDB::DeleteCQCustomAgentByInstance(uint32 instanceCharID) {
+    uint32 agentID = 0;
+    if (!GetCQTableAgentIdFromProtocolId(instanceCharID, agentID)) {
+        return false;
+    }
+    DBerror err;
+    uint32 affected = 0;
+    if (!sDatabase.RunQuery(err, affected, "DELETE FROM staCQCustomAgents WHERE agentID=%u", agentID)) {
+        _log(DATABASE__ERROR, "DeleteCQCustomAgentByInstance: %s", err.c_str());
+        return false;
+    }
+    return affected > 0;
+}
+
+bool ServiceDB::GetCQTableAgentIdFromProtocolId(uint32 protocolCharId, uint32& outStaAgentId) {
+    outStaAgentId = 0;
+    uint32 internal = 0;
+    if (CQAgentIDFromInstanceCharID(protocolCharId, internal)) {
+        outStaAgentId = internal;
+        return true;
+    }
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT agentID FROM staCQCustomAgents WHERE missionAgentID = %u AND enabled = 1 LIMIT 1",
+        protocolCharId))
+    {
+        _log(DATABASE__ERROR, "GetCQTableAgentIdFromProtocolId: %s", res.error.c_str());
+        return false;
+    }
+    DBResultRow row;
+    if (!res.GetRow(row)) {
+        return false;
+    }
+    outStaAgentId = row.GetUInt(0);
+    return true;
+}
+
+bool ServiceDB::GetCQCustomAgentByTableId(uint32 staAgentId, CQCustomAgentRow& out) {
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+        "SELECT ca.agentID, ca.missionAgentID, ca.appearanceCharID, ca.posX, ca.posY, ca.posZ, ca.yaw,"
+        "  COALESCE(agt.corporationID, chapp.corporationID, 0),"
+        "  IF(ca.appearanceCharID > 0 AND ca.missionAgentID > 0 AND ca.appearanceCharID != ca.missionAgentID,"
+        "     chapp.gender, COALESCE(chNPC.gender, chapp.gender, 0)),"
+        "  IF(ca.appearanceCharID > 0 AND ca.missionAgentID > 0 AND ca.appearanceCharID != ca.missionAgentID,"
+        "     chapp.bloodlineID, COALESCE(bl.bloodlineID, chapp.bloodlineID, 0)),"
+        "  IF(ca.appearanceCharID > 0 AND ca.missionAgentID > 0 AND ca.appearanceCharID != ca.missionAgentID,"
+        "     chapp.raceID, COALESCE(chapp.raceID, 0))"
+        " FROM staCQCustomAgents ca"
+        "  LEFT JOIN agtAgents agt ON agt.agentID = ca.missionAgentID"
+        "  LEFT JOIN chrNPCCharacters chNPC ON chNPC.characterID = ca.missionAgentID"
+        "  LEFT JOIN bloodlineTypes bl ON bl.typeID = chNPC.typeID"
+        "  LEFT JOIN chrCharacters chapp ON chapp.characterID = ca.appearanceCharID"
+        " WHERE ca.agentID = %u AND ca.enabled = 1",
+        staAgentId))
+    {
+        _log(DATABASE__ERROR, "GetCQCustomAgentByTableId: %s", res.error.c_str());
+        return false;
+    }
+    DBResultRow row;
+    if (!res.GetRow(row)) {
+        return false;
+    }
+    out.agentID = row.GetUInt(0);
+    out.missionAgentID = row.IsNull(1) ? 0 : row.GetUInt(1);
+    out.appearanceCharID = row.GetUInt(2);
+    out.posX = row.GetDouble(3);
+    out.posY = row.GetDouble(4);
+    out.posZ = row.GetDouble(5);
+    out.yaw = static_cast<float>(row.GetDouble(6));
+    out.corporationID = row.GetUInt(7);
+    out.genderID = static_cast<uint8>(row.GetUInt(8));
+    out.bloodlineID = row.GetUInt(9);
+    out.raceID = row.GetUInt(10);
+    out.instanceCharID = CQInstanceCharIDFromAgentID(out.agentID);
+    return true;
+}
+
+bool ServiceDB::GetCQCustomAgentByInstance(uint32 instanceCharID, CQCustomAgentRow& out) {
+    uint32 agentID = 0;
+    if (!CQAgentIDFromInstanceCharID(instanceCharID, agentID)) {
+        return false;
+    }
+    return GetCQCustomAgentByTableId(agentID, out);
+}
+
+bool ServiceDB::GetCQCustomAgentStationID(uint32 instanceCharID, uint32& outStationID) {
+    outStationID = 0;
+    uint32 agentID = 0;
+    if (!GetCQTableAgentIdFromProtocolId(instanceCharID, agentID)) {
+        return false;
+    }
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res, "SELECT stationID FROM staCQCustomAgents WHERE agentID=%u", agentID)) {
+        _log(DATABASE__ERROR, "GetCQCustomAgentStationID: %s", res.error.c_str());
+        return false;
+    }
+    DBResultRow row;
+    if (!res.GetRow(row)) {
+        return false;
+    }
+    outStationID = row.GetUInt(0);
+    return true;
+}
+
+void ServiceDB::SaveKillOrLoss(KillData &data) {
+    /* Negative alliance IDs must not reach the client — Crucible resolves kill rows via EveOwners (RecordNotFound on -1). */
+    const int32 victimAlliance = (data.victimAllianceID < 0 ? 0 : data.victimAllianceID);
+    const uint32 finalAlliance = (data.finalAllianceID < 0 ? 0u : (uint32)data.finalAllianceID);
+    const uint32 victimFaction = (data.victimFactionID < 0 ? 0u : (uint32)data.victimFactionID);
+    const uint32 finalFaction = (data.finalFactionID < 0 ? 0u : (uint32)data.finalFactionID);
+
+    std::string blobEsc;
+    sDatabase.DoEscapeString(blobEsc, data.killBlob);
+
+    DBerror err;
+    if (!sDatabase.RunQuery(err,
             " INSERT INTO chrKillTable (solarSystemID, victimCharacterID, victimCorporationID, victimAllianceID, victimFactionID,"
             "victimShipTypeID, victimDamageTaken, finalCharacterID, finalCorporationID, finalAllianceID, finalFactionID, finalShipTypeID,"
             "finalWeaponTypeID, finalSecurityStatus, finalDamageDone, killBlob, killTime, moonID)"
-            " VALUES (%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%u,%f,%u,'%s',%lli,%u)",
+            " VALUES (%u,%u,%u,%i,%u,%u,%u,%u,%u,%u,%u,%u,%u,%f,%u,'%s',%lli,%u)",
                 data.solarSystemID, data.victimCharacterID, data.victimCorporationID,
-                data.victimAllianceID, data.victimFactionID, data.victimShipTypeID, data.victimDamageTaken,
-                data.finalCharacterID, data.finalCorporationID, data.finalAllianceID, data.finalFactionID,
+                victimAlliance, victimFaction, data.victimShipTypeID, data.victimDamageTaken,
+                data.finalCharacterID, data.finalCorporationID, finalAlliance, finalFaction,
                 data.finalShipTypeID, data.finalWeaponTypeID, data.finalSecurityStatus, data.finalDamageDone,
-                data.killBlob.c_str(), data.killTime, data.moonID);
+                blobEsc.c_str(), data.killTime, data.moonID)) {
+        codelog(DATABASE__ERROR, "SaveKillOrLoss failed: %s", err.c_str());
+    }
 }

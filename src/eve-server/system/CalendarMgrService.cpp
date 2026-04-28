@@ -69,7 +69,7 @@ PyResult CalendarMgrService::SendEventResponse(PyCallArgs& call, PyInt* eventID,
 {
     CalendarDB::SaveEventResponse(call.client->GetCharacterID(), eventID->value(), response->value());
 
-    // if this is an invitation, update calendar for non-denial responses
+    call.client->SendNotification("OnReloadCalendar", "charid", new PyTuple(0), false);
 
     return nullptr;
 }
@@ -125,6 +125,12 @@ PyResult CalendarMgrService::EditPersonalEvent(PyCallArgs& call, PyInt* eventID,
     sLog.Cyan( "CalendarMgrService::Handle_EditPersonalEvent()", "size=%lu", call.tuple->size());
     call.Dump(SERVICE__CALL_DUMP);
 
+    const std::string t = PyRep::StringContent(title);
+    const std::string d = PyRep::StringContent(description);
+    CalendarDB::EditEvent(eventID->value(), call.client->GetCharacterID(), dateTime->value(),
+        duration->value(), t, d, PyRep::IntegerValue(important) != 0);
+    call.client->SendNotification("OnReloadCalendar", "charid", new PyTuple(0), false);
+
     return nullptr;
 }
 
@@ -134,6 +140,12 @@ PyResult CalendarMgrService::EditCorporationEvent(PyCallArgs& call, PyInt* event
 
     sLog.Cyan( "CalendarMgrService::Handle_EditCorporationEvent()", "size=%lu", call.tuple->size());
     call.Dump(SERVICE__CALL_DUMP);
+
+    const std::string t = PyRep::StringContent(title);
+    const std::string d = PyRep::StringContent(description);
+    CalendarDB::EditEvent(eventID->value(), call.client->GetCorporationID(), dateTime->value(),
+        duration->value(), t, d, PyRep::IntegerValue(important) != 0);
+    call.client->SendNotification("OnReloadCalendar", "charid", new PyTuple(0), false);
 
     return nullptr;
 }
@@ -145,6 +157,12 @@ PyResult CalendarMgrService::EditAllianceEvent(PyCallArgs& call, PyInt* eventID,
     sLog.Cyan( "CalendarMgrService::Handle_EditAllianceEvent()", "size=%lu", call.tuple->size());
     call.Dump(SERVICE__CALL_DUMP);
 
+    const std::string t = PyRep::StringContent(title);
+    const std::string d = PyRep::StringContent(description);
+    CalendarDB::EditEvent(eventID->value(), call.client->GetAllianceID(), dateTime->value(),
+        duration->value(), t, d, PyRep::IntegerValue(important) != 0);
+    call.client->SendNotification("OnReloadCalendar", "charid", new PyTuple(0), false);
+
     return nullptr;
 }
 
@@ -155,11 +173,8 @@ PyResult CalendarMgrService::UpdateEventParticipants(PyCallArgs& call, PyInt* ev
     sLog.Cyan( "CalendarMgrService::Handle_UpdateEventParticipants()", "size=%lu", call.tuple->size());
     call.Dump(SERVICE__CALL_DUMP);
 
-    // TODO: implement this
-    CalendarDB::UpdateEventParticipants();
-
-    //  this will need to update invitees and inform them of the invitation
-    // their calendar is updated based on their response (SendEventResponse)
+    CalendarDB::UpdateEventParticipants(eventID->value(), call.client->GetCharacterID(), charsToAdd, charsToRemove);
+    call.client->SendNotification("OnReloadCalendar", "charid", new PyTuple(0), false);
 
     return nullptr;
 }

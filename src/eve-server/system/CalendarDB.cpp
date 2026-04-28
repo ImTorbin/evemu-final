@@ -26,8 +26,82 @@
 
 #include "eve-server.h"
 
+#include <set>
+#include <sstream>
+
 #include "../../eve-common/EVE_Calendar.h"
 #include "system/CalendarDB.h"
+
+namespace {
+
+    void EscapeCalText(std::string& out, const std::string& in)
+    {
+        sDatabase.DoEscapeString(out, in);
+    }
+
+    std::string BuildInviteeListCsv(PyList* list)
+    {
+        if (list == nullptr)
+            return {};
+        std::ostringstream oss;
+        bool first = true;
+        for (PyRep* p : list->items) {
+            const uint32 id = PyRep::IntegerValueU32(p);
+            if (id == 0)
+                continue;
+            if (!first)
+                oss << ',';
+            first = false;
+            oss << id;
+        }
+        return oss.str();
+    }
+
+    void ParseInviteeCsv(const char* csv, std::set<uint32>& out)
+    {
+        if (csv == nullptr || *csv == 0)
+            return;
+        std::string s(csv);
+        size_t pos = 0;
+        while (pos < s.length()) {
+            size_t comma = s.find(',', pos);
+            std::string token = (comma == std::string::npos) ? s.substr(pos) : s.substr(pos, comma - pos);
+            if (!token.empty()) {
+                const uint32 id = strtoul(token.c_str(), nullptr, 10);
+                if (id)
+                    out.insert(id);
+            }
+            if (comma == std::string::npos)
+                break;
+            pos = comma + 1;
+        }
+    }
+
+    void CollectCharIds(PyList* list, std::set<uint32>& out)
+    {
+        if (list == nullptr)
+            return;
+        for (PyRep* p : list->items) {
+            const uint32 id = PyRep::IntegerValueU32(p);
+            if (id)
+                out.insert(id);
+        }
+    }
+
+    std::string FormatInviteeCsv(const std::set<uint32>& ids)
+    {
+        std::ostringstream oss;
+        bool first = true;
+        for (uint32 id : ids) {
+            if (!first)
+                oss << ',';
+            first = false;
+            oss << id;
+        }
+        return oss.str();
+    }
+
+} // namespace
 
 
 void CalendarDB::DeleteEvent(uint32 eventID)
@@ -39,38 +113,21 @@ void CalendarDB::DeleteEvent(uint32 eventID)
 // for personal char events
 PyRep* CalendarDB::SaveNewEvent(uint32 ownerID, Call_CreateEventWithInvites& args)
 {
-    EvE::TimeParts data = EvE::TimeParts();
-    data = GetTimeParts(args.startDateTime);
+    EvE::TimeParts data = GetTimeParts(args.startDateTime);
 
-    DBerror err;
-    if (!args.invitees->empty()) {
-        bool comma(false);
-        std::ostringstream str;
-        PyList* list(args.invitees->AsList());
-        PyList::const_iterator itr = list->begin(), end = list->end();
-        while (itr != end) {
-            if (comma) {
-                str << ",";
-            } else {
-                comma = true;
-            }
-            str << *itr;
-            ++itr;
-        }
-
-        sDatabase.RunQuery(err,
-                "INSERT INTO `sysCalendarInvitees`(`eventID`, `inviteeList`)"
-                " VALUES %s", str.str().c_str());
-    }
+    std::string titleEsc, descEsc;
+    EscapeCalText(titleEsc, args.title);
+    EscapeCalText(descEsc, args.description);
 
     uint32 eventID(0);
+    DBerror err;
     if (args.duration) {
         if (!sDatabase.RunQueryLID(err, eventID,
             "INSERT INTO sysCalendarEvents(ownerID, creatorID, eventDateTime, eventDuration, importance,"
             " eventTitle, eventText, flag, month, year)"
             " VALUES (%u, %u, %lli, %u, %u, '%s', '%s', %u, %u, %u)",
-            ownerID, ownerID, args.startDateTime, args.duration, args.important, args.title.c_str(),
-            args.description.c_str(), Calendar::Flag::Personal, data.month, data.year))
+            ownerID, ownerID, args.startDateTime, args.duration, args.important, titleEsc.c_str(),
+            descEsc.c_str(), Calendar::Flag::Personal, data.month, data.year))
         {
             codelog(DATABASE__ERROR, "Error in SaveNewEvent query: %s", err.c_str());
             return PyStatic.NewZero();
@@ -80,11 +137,23 @@ PyRep* CalendarDB::SaveNewEvent(uint32 ownerID, Call_CreateEventWithInvites& arg
             "INSERT INTO sysCalendarEvents(ownerID, creatorID, eventDateTime, importance,"
             " eventTitle, eventText, flag, month, year)"
             " VALUES (%u, %u, %lli, %u, '%s', '%s', %u, %u, %u)",
-            ownerID, ownerID, args.startDateTime, args.important, args.title.c_str(),
-            args.description.c_str(), Calendar::Flag::Personal, data.month, data.year))
+            ownerID, ownerID, args.startDateTime, args.important, titleEsc.c_str(),
+            descEsc.c_str(), Calendar::Flag::Personal, data.month, data.year))
         {
             codelog(DATABASE__ERROR, "Error in SaveNewEvent query: %s", err.c_str());
             return PyStatic.NewZero();
+        }
+    }
+
+    if (args.invitees != nullptr && !args.invitees->empty()) {
+        const std::string csv = BuildInviteeListCsv(args.invitees);
+        if (!csv.empty()) {
+            std::string csvEsc;
+            EscapeCalText(csvEsc, csv);
+            if (!sDatabase.RunQuery(err,
+                    "INSERT INTO `sysCalendarInvitees`(`eventID`, `inviteeList`)"
+                    " VALUES (%u, '%s')", eventID, csvEsc.c_str()))
+                codelog(DATABASE__ERROR, "SaveNewEvent invitees: %s", err.c_str());
         }
     }
 
@@ -110,6 +179,10 @@ PyRep* CalendarDB::SaveNewEvent(uint32 ownerID, uint32 creatorID, Call_CreateEve
     EvE::TimeParts data = EvE::TimeParts();
     data = GetTimeParts(args.startDateTime);
 
+    std::string titleEsc, descEsc;
+    EscapeCalText(titleEsc, args.title);
+    EscapeCalText(descEsc, args.description);
+
     uint32 eventID(0);
     DBerror err;
     if (args.duration) {
@@ -118,7 +191,7 @@ PyRep* CalendarDB::SaveNewEvent(uint32 ownerID, uint32 creatorID, Call_CreateEve
             " eventTitle, eventText, flag, month, year)"
             " VALUES (%u, %u, %lli, %u, %u, '%s', '%s', %u, %u, %u)",
             ownerID, creatorID, args.startDateTime, args.duration, args.important,
-            args.title.c_str(), args.description.c_str(), flag, data.month, data.year))
+            titleEsc.c_str(), descEsc.c_str(), flag, data.month, data.year))
         {
             codelog(DATABASE__ERROR, "Error in SaveNewEvent query: %s", err.c_str());
             return PyStatic.NewZero();
@@ -129,7 +202,7 @@ PyRep* CalendarDB::SaveNewEvent(uint32 ownerID, uint32 creatorID, Call_CreateEve
             " eventTitle, eventText, flag, month, year)"
             " VALUES (%u, %u, %lli, %u, '%s', '%s', %u, %u, %u)",
             ownerID, creatorID, args.startDateTime, args.important,
-            args.title.c_str(), args.description.c_str(), flag, data.month, data.year))
+            titleEsc.c_str(), descEsc.c_str(), flag, data.month, data.year))
         {
             codelog(DATABASE__ERROR, "Error in SaveNewEvent query: %s", err.c_str());
             return PyStatic.NewZero();
@@ -146,13 +219,17 @@ uint32 CalendarDB::SaveSystemEvent(uint32 ownerID, uint32 creatorID, int64 start
     EvE::TimeParts data = EvE::TimeParts();
     data = GetTimeParts(startDateTime);
 
+    std::string titleEsc, descEsc;
+    EscapeCalText(titleEsc, title);
+    EscapeCalText(descEsc, description);
+
     uint32 eventID(0);
     DBerror err;
     sDatabase.RunQueryLID(err, eventID,
         "INSERT INTO sysCalendarEvents(ownerID, creatorID, eventDateTime, autoEventType,"
         " eventTitle, eventText, flag, month, year, importance)"
         " VALUES (%u, %u, %lli, %u, '%s', '%s', %u, %u, %u, %u)",
-        ownerID, creatorID, startDateTime, autoEventType, title.c_str(), description.c_str(),
+        ownerID, creatorID, startDateTime, autoEventType, titleEsc.c_str(), descEsc.c_str(),
         Calendar::Flag::Automated, data.month, data.year, important?1:0);
 
     return eventID;
@@ -161,24 +238,22 @@ uint32 CalendarDB::SaveSystemEvent(uint32 ownerID, uint32 creatorID, int64 start
 
 PyRep* CalendarDB::GetEventList(uint32 ownerID, uint32 month, uint32 year)
 {
+    PyList* list = new PyList();
     if (ownerID == 0)
-        return nullptr;
+        return list;
 
     DBQueryResult res;
     if (!sDatabase.RunQuery(res,
         "SELECT eventID, ownerID, eventDateTime, dateModified, eventDuration, importance, eventTitle, flag,"
         " autoEventType, isDeleted"
-        " FROM sysCalendarEvents WHERE ownerID = %u AND month = %u AND year = %u", ownerID, month, year))
+        " FROM sysCalendarEvents WHERE ownerID = %u AND month = %u AND year = %u"
+        " AND IFNULL(isDeleted, 0) = 0", ownerID, month, year))
     {
         codelog(DATABASE__ERROR, "Error in GetEventList query: %s", res.error.c_str());
-        return nullptr;
+        return list;
     }
 
-    if (res.GetRowCount() < 1)
-        return nullptr;
-
     DBResultRow row;
-    PyList* list = new PyList();
     while (res.GetRow(row)) {
         PyDict* dict = new PyDict();
             dict->SetItemString("eventID",              new PyInt(row.GetInt(0)));
@@ -230,6 +305,8 @@ void CalendarDB::SaveEventResponse(uint32 charID, uint32 eventID, uint32 respons
 {
     DBerror err;
     sDatabase.RunQuery(err,
+        "DELETE FROM `sysCalendarResponses` WHERE `eventID` = %u AND `charID` = %u", eventID, charID);
+    sDatabase.RunQuery(err,
         "INSERT INTO `sysCalendarResponses`(`eventID`, `charID`, `response`)"
         " VALUES (%u, %u, %u)", eventID, charID, response);
 }
@@ -276,10 +353,86 @@ PyRep* CalendarDB::GetResponsesToEvent(uint32 eventID)
     return list;
 }
 
-void CalendarDB::UpdateEventParticipants()
+void CalendarDB::UpdateEventParticipants(uint32 eventID, uint32 actingCharID, PyList* charsToAdd, PyList* charsToRemove)
 {
+    DBQueryResult res;
+    if (!sDatabase.RunQuery(res,
+            "SELECT ownerID FROM sysCalendarEvents WHERE eventID = %u AND IFNULL(isDeleted, 0) = 0", eventID)) {
+        codelog(DATABASE__ERROR, "UpdateEventParticipants: query failed: %s", res.error.c_str());
+        return;
+    }
+    DBResultRow row;
+    if (!res.GetRow(row)) {
+        codelog(SERVICE__ERROR, "UpdateEventParticipants: event %u not found", eventID);
+        return;
+    }
+    if (row.GetUInt(0) != actingCharID) {
+        codelog(SERVICE__ERROR, "UpdateEventParticipants: char %u cannot modify event %u", actingCharID, eventID);
+        return;
+    }
+
+    std::set<uint32> ids;
+    DBQueryResult invRes;
+    if (sDatabase.RunQuery(invRes, "SELECT inviteeList FROM sysCalendarInvitees WHERE eventID = %u", eventID)) {
+        DBResultRow invRow;
+        if (invRes.GetRow(invRow) && !invRow.IsNull(0))
+            ParseInviteeCsv(invRow.GetText(0), ids);
+    }
+
+    CollectCharIds(charsToAdd, ids);
+    if (charsToRemove != nullptr) {
+        for (PyRep* p : charsToRemove->items) {
+            const uint32 id = PyRep::IntegerValueU32(p);
+            if (id)
+                ids.erase(id);
+        }
+    }
+
     DBerror err;
+    sDatabase.RunQuery(err, "DELETE FROM sysCalendarInvitees WHERE eventID = %u", eventID);
+    if (!ids.empty()) {
+        const std::string csv = FormatInviteeCsv(ids);
+        std::string csvEsc;
+        EscapeCalText(csvEsc, csv);
+        sDatabase.RunQuery(err,
+            "INSERT INTO sysCalendarInvitees (eventID, inviteeList) VALUES (%u, '%s')", eventID, csvEsc.c_str());
+    }
 }
 
+bool CalendarDB::EditEvent(uint32 eventID, uint32 scopeOwnerID, int64 startDateTime, uint32 duration,
+                           const std::string& title, const std::string& description, bool important)
+{
+    EvE::TimeParts data = GetTimeParts(startDateTime);
+    std::string titleEsc, descEsc;
+    EscapeCalText(titleEsc, title);
+    EscapeCalText(descEsc, description);
+    const int64 modified = (int64)GetFileTimeNow();
+    const uint32 imp = important ? 1 : 0;
 
+    DBerror err;
+    uint32 affected = 0;
+    bool ok;
+    if (duration > 0) {
+        ok = sDatabase.RunQuery(err, affected,
+            "UPDATE sysCalendarEvents SET eventDateTime = %lli, eventDuration = %u, importance = %u,"
+            " eventTitle = '%s', eventText = '%s', month = %u, year = %u, dateModified = %lli"
+            " WHERE eventID = %u AND ownerID = %u AND IFNULL(isDeleted, 0) = 0",
+            startDateTime, duration, imp, titleEsc.c_str(), descEsc.c_str(),
+            data.month, data.year, modified, eventID, scopeOwnerID);
+    } else {
+        ok = sDatabase.RunQuery(err, affected,
+            "UPDATE sysCalendarEvents SET eventDateTime = %lli, eventDuration = NULL, importance = %u,"
+            " eventTitle = '%s', eventText = '%s', month = %u, year = %u, dateModified = %lli"
+            " WHERE eventID = %u AND ownerID = %u AND IFNULL(isDeleted, 0) = 0",
+            startDateTime, imp, titleEsc.c_str(), descEsc.c_str(),
+            data.month, data.year, modified, eventID, scopeOwnerID);
+    }
 
+    if (!ok) {
+        codelog(DATABASE__ERROR, "EditEvent failed: %s", err.c_str());
+        return false;
+    }
+    if (affected == 0)
+        codelog(SERVICE__ERROR, "EditEvent: no row updated (eventID %u owner %u)", eventID, scopeOwnerID);
+    return affected > 0;
+}

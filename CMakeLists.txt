@@ -8,9 +8,8 @@
 ###############
 # CMake setup #
 ###############
-# We need a target-specific property INCLUDE_DIRECTORIES which
-# is part of CMake 2.8.8 and later.
-CMAKE_MINIMUM_REQUIRED( VERSION 2.8.8 FATAL_ERROR )
+# CMake 4.x requires a minimum of 3.5; 3.10+ is widely available (VS, Docker, Linux).
+CMAKE_MINIMUM_REQUIRED( VERSION 3.10 FATAL_ERROR )
 
 PROJECT( "evemu" )
 SET( PROJECT_DESCRIPTION_SUMMARY "A server emulator for EVE Online" )

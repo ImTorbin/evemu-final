@@ -83,13 +83,14 @@ void Sentry::EncodeDestiny( Buffer& into )
 {
     using namespace Destiny;
 
+    const GPoint bh(m_destiny != nullptr ? m_destiny->GetPosition() : GetPosition());
     BallHeader head = BallHeader();
         head.entityID = GetID();
         head.mode = Ball::Mode::STOP;
         head.radius = GetRadius();
-        head.posX = x();
-        head.posY = y();
-        head.posZ = z();
+        head.posX = bh.x;
+        head.posY = bh.y;
+        head.posZ = bh.z;
         head.flags = Ball::Flag::IsMassive;
     into.Append( head );
     MassSector mass = MassSector();
@@ -192,7 +193,7 @@ void Sentry::Killed(Damage &damage) {
         GetName(), GetID(), x(), y(), z(), wreckItemRef->name(), wreckItemRef->itemID(), wreckPosition.x, wreckPosition.y, wreckPosition.z);
 
     if (MakeRandomFloat() < sConfig.npc.LootDropChance)
-        DropLoot(wreckItemRef, m_self->groupID(), killerID);
+        DropLoot(wreckItemRef, m_self->groupID(), killerID, pClient != nullptr);
 
     DBSystemDynamicEntity wreckEntity = DBSystemDynamicEntity();
         wreckEntity.allianceID = killer->GetAllianceID();

@@ -16,6 +16,28 @@
 #include "database/EVEDBUtils.h"
 #include "missions/MissionDataMgr.h"
 #include "inventory/ItemFactory.h"
+#include "../../eve-common/EVE_Standings.h"
+#include "../../eve-common/EVE_Agent.h"
+#include <algorithm>
+#include <vector>
+
+namespace {
+template<typename T>
+void SliceAgentPool(std::vector<T>& pool, uint32 agentID, uint32 agentCorpID)
+{
+    if (agentID == 0 || pool.size() <= 1)
+        return;
+    const size_t n = pool.size();
+    const size_t width = std::max<size_t>(1, (n * 2 + 2) / 5);
+    const uint64_t mix = (uint64_t{agentID} << 32) ^ (uint64_t{agentCorpID} * 0x9E3779B97F4A7C15ULL);
+    const size_t start = static_cast<size_t>(mix % n);
+    std::vector<T> out;
+    out.reserve(width);
+    for (size_t i = 0; i < width; ++i)
+        out.push_back(pool[(start + i) % n]);
+    pool = std::move(out);
+}
+}  // namespace
 
 MissionDataMgr::MissionDataMgr()
 {
@@ -24,6 +46,7 @@ MissionDataMgr::MissionDataMgr()
     m_offers.clear();
     m_mining.clear();
     m_courier.clear();
+    m_courierByAgent.clear();
     m_xoffers.clear();
     m_missions.clear();
 }
@@ -41,6 +64,7 @@ void MissionDataMgr::Clear()
     m_offers.clear();
     m_mining.clear();
     m_courier.clear();
+    m_courierByAgent.clear();
     m_xoffers.clear();
     m_missions.clear();
 }
@@ -83,9 +107,13 @@ void MissionDataMgr::Process()
                             MissionDB::RemoveMissionItem(itr->first, itr->second.courierTypeID, itr->second.courierAmount);
                         }
                     }
+                    if (pClient != nullptr)
+                        pAgent->UpdateStandings(pClient, Standings::MissionFailure, itr->second.important);
                 } else if (itr->second.stateID == Mission::State::Offered) {
                     pAgent->SendMissionUpdate(pClient, "offer_expired");
                     itr->second.stateID = Mission::State::Expired;
+                    if (pClient != nullptr)
+                        pAgent->UpdateStandings(pClient, Standings::MissionOfferExpired, itr->second.important);
                 }
                 std::multimap<uint32, MissionOffer>::iterator itr2 = m_aoffers.find(itr->second.agentID);
                 if (itr2 != m_aoffers.end())
@@ -129,8 +157,9 @@ void MissionDataMgr::Populate()
     DBResultRow row;
 
     MissionDB::LoadCourierData(*res);
+    uint32 nCourierByAgent = 0;
     while (res->GetRow(row)) {
-        //SELECT id, briefingID, name, level, typeID, important, storyline, itemTypeID, itemQty, rewardISK, rewardItemID, rewardItemQty, bonusISK, bonusTime, sysRange, raceID FROM qstCourier
+        //SELECT id..raceID, agentID FROM qstCourier
         CourierData data = CourierData();
         data.missionID     = row.GetInt(0);
         data.briefingID    = row.GetInt(1);
@@ -149,13 +178,19 @@ void MissionDataMgr::Populate()
         data.bonusTime     = row.GetInt(14);
         data.range         = row.GetInt(15);
         data.raceID        = row.GetInt(16);
-        if (data.important) {
+        data.chainIndex    = row.GetUInt(17);
+        const uint32 agentID = row.GetInt(18);
+        if (agentID != 0) {
+            m_courierByAgent.emplace(agentID, data);
+            ++nCourierByAgent;
+        } else if (data.important) {
             m_courierImp.emplace(row.GetInt(3), data);
         } else {
             m_courier.emplace(row.GetInt(3), data);
         }
     }
-    sLog.Cyan("   MissionDataMgr", "%lu(%lu) Courier Mission Data Sets loaded in %.3fms.", m_courier.size(), m_courierImp.size(),(GetTimeMSeconds() - start));
+    sLog.Cyan("   MissionDataMgr", "%lu(%lu) Courier Mission Data Sets + %u agent-scoped, loaded in %.3fms.",
+              m_courier.size(), m_courierImp.size(), nCourierByAgent, (GetTimeMSeconds() - start));
 
     //res->Reset();
     start = GetTimeMSeconds();
@@ -223,8 +258,8 @@ void MissionDataMgr::Populate()
     MissionDB::LoadMissionData(*res);
     while (res->GetRow(row)) {
         //SELECT id, briefingID, name, level, typeID, important, storyline, raceID, constellationID, corporationID, dungeonID,
-        // rewardISK, rewardItemID, rewardISKQty, rewardItemQty, bonusISK, bonusTime FROM agtMissions
-        MissionData data = MissionData();
+        // rewardISK, rewardItemID, rewardItemQty, bonusISK, bonusTime FROM agtMissions
+        MissionData data{};
         data.missionID = row.GetInt(0);
         data.briefingID = row.GetInt(1);
         data.name = row.GetText(2);
@@ -234,6 +269,11 @@ void MissionDataMgr::Populate()
         data.constellationID = row.GetInt(8);
         data.corporationID = row.GetInt(9);
         data.dungeonID = row.GetInt(10);
+        data.rewardISK = row.GetInt(11);
+        data.rewardItemID = row.GetInt(12);
+        data.rewardItemQty = row.GetInt(13);
+        data.bonusISK = row.GetInt(14);
+        data.bonusTime = row.GetInt(15);
         if (data.important) {
             m_missionsImp.emplace(row.GetInt(3), data);
         } else {
@@ -248,7 +288,7 @@ void MissionDataMgr::Populate()
     while (res->GetRow(row)) {
         //SELECT acceptFee, agentID, characterID, courierAmount, courierTypeID, courierItemVolume, dateAccepted, dateIssued, destinationID, destinationTypeID, destinationOwnerID, destinationSystemID,
         // expiryTime, important, storyline, missionID, briefingID, name, offerID, originID, originOwnerID, originSystemID, remoteCompletable, remoteOfferable,
-        // rewardISK, rewardItemID, rewardItemQty, rewardLP, bonusISK, bonusTime, stateID, typeID, dungeonLocationID, dungeonSolarSystemID FROM agtOffers
+        // rewardISK, rewardItemID, rewardItemQty, rewardExtraItemID, rewardLP, bonusISK, bonusTime, stateID, typeID, dungeonLocationID, dungeonSolarSystemID FROM agtOffers
         MissionOffer offer = MissionOffer();
         offer.acceptFee = row.GetInt(0);
         offer.agentID = row.GetInt(1);
@@ -277,13 +317,14 @@ void MissionDataMgr::Populate()
         offer.rewardISK = row.GetInt(24);
         offer.rewardItemID = row.GetInt(25);
         offer.rewardItemQty = row.GetInt(26);
-        offer.rewardLP = row.GetInt(27);
-        offer.bonusISK = row.GetInt(28);
-        offer.bonusTime = row.GetInt(29);
-        offer.stateID = row.GetInt(30);
-        offer.typeID = row.GetInt(31);
-        offer.dungeonLocationID = row.GetInt(32);
-        offer.dungeonSolarSystemID = row.GetInt(33);
+        offer.rewardExtraItemID = row.GetInt(27);
+        offer.rewardLP = row.GetInt(28);
+        offer.bonusISK = row.GetInt(29);
+        offer.bonusTime = row.GetInt(30);
+        offer.stateID = row.GetInt(31);
+        offer.typeID = row.GetInt(32);
+        offer.dungeonLocationID = row.GetInt(33);
+        offer.dungeonSolarSystemID = row.GetInt(34);
         offer.dateCompleted = 0;
         // will need to determine how to store/retrieve bookmarks as a list of dicts here
         offer.bookmarks = new PyList();
@@ -299,7 +340,7 @@ void MissionDataMgr::Populate()
         MissionDB::LoadClosedOffers(*res);
     while (res->GetRow(row)) {
         //SELECT agentID, characterID, courierAmount, courierTypeID, dateAccepted, dateCompleted, dateIssued, destinationID, expiryTime, important, storyline, missionID, name,
-        // offerID, originID, rewardISK, rewardItemID, rewardItemQty, rewardLP, stateID, typeID FROM agtOffers
+        // offerID, originID, rewardISK, rewardItemID, rewardItemQty, rewardExtraItemID, rewardLP, stateID, typeID FROM agtOffers
         MissionOffer offer = MissionOffer();
         offer.agentID = row.GetInt(0);
         offer.characterID = row.GetInt(1);
@@ -319,9 +360,10 @@ void MissionDataMgr::Populate()
         offer.rewardISK = row.GetInt(15);
         offer.rewardItemID = row.GetInt(16);
         offer.rewardItemQty = row.GetInt(17);
-        offer.rewardLP = row.GetInt(18);
-        offer.stateID = row.GetInt(19);
-        offer.typeID = row.GetInt(20);
+        offer.rewardExtraItemID = row.GetInt(18);
+        offer.rewardLP = row.GetInt(19);
+        offer.stateID = row.GetInt(20);
+        offer.typeID = row.GetInt(21);
         offer.briefingID = 0;
         offer.acceptFee = 0;
         offer.bonusISK = 0;
@@ -418,7 +460,120 @@ void MissionDataMgr::LoadMissionOffers(uint32 charID, std::vector<MissionOffer>&
     }
 }
 
-void MissionDataMgr::CreateMissionOffer(uint8 typeID, uint8 level, uint8 raceID, bool important, MissionOffer& data)
+bool MissionDataMgr::BuildCourierTemplateVector(uint8 level, uint8 raceID, bool important, uint32 agentID, uint32 characterID, uint32 agentCorpID, std::vector<CourierData>& cVec)
+{
+    cVec.clear();
+    bool usedGlobalCourierPool = false;
+    if (agentID != 0) {
+        auto ar = m_courierByAgent.equal_range(agentID);
+        for (auto it = ar.first; it != ar.second; ++it) {
+            if (it->second.level != level)
+                continue;
+            if (it->second.important != important)
+                continue;
+            cVec.push_back(it->second);
+        }
+    }
+    if (cVec.empty()) {
+        usedGlobalCourierPool = true;
+        if (important) {
+            auto itr = m_courierImp.equal_range(level);
+            for (auto it = itr.first; it != itr.second; ++it)
+                cVec.push_back(it->second);
+        } else {
+            auto itr = m_courier.equal_range(level);
+            for (auto it = itr.first; it != itr.second; ++it)
+                cVec.push_back(it->second);
+        }
+    }
+    if (characterID != 0 && (!cVec.empty())) {
+        bool allChained = true;
+        uint8 maxStep = 0;
+        for (const auto& cur : cVec) {
+            if (cur.chainIndex == 0) {
+                allChained = false;
+                break;
+            }
+            if (cur.chainIndex > maxStep)
+                maxStep = cur.chainIndex;
+        }
+        if (allChained && maxStep > 0) {
+            std::vector<uint16_t> chainMissionIDs;
+            chainMissionIDs.reserve(cVec.size());
+            for (const auto& cur : cVec)
+                chainMissionIDs.push_back(cur.missionID);
+            const uint32 done = MissionDB::CountCompletedChainOffersForAgent(characterID, agentID, chainMissionIDs);
+            const uint8 wantStep = static_cast<uint8>((done % maxStep) + 1);
+            std::vector<CourierData> filtered;
+            for (const auto& cur : cVec) {
+                if (cur.chainIndex == wantStep)
+                    filtered.push_back(cur);
+            }
+            if (!filtered.empty()) {
+                cVec = std::move(filtered);
+            } else {
+                _log(AGENT__WARNING,
+                     "CreateMissionOffer: chain wantStep %u (done=%u maxStep=%u) matched no template for agent %u",
+                     wantStep, done, maxStep, agentID);
+            }
+        }
+    }
+
+    if (usedGlobalCourierPool && agentID != 0 && cVec.size() > 1)
+        SliceAgentPool(cVec, agentID, agentCorpID);
+
+    return !cVec.empty();
+}
+
+bool MissionDataMgr::HasMiningTemplates(uint8 level, bool important) const
+{
+    if (important)
+        return m_miningImp.count(level) > 0;
+    return m_mining.count(level) > 0;
+}
+
+bool MissionDataMgr::HasEncounterTemplates(uint8 level, bool important, uint32 agentCorpID) const
+{
+    auto scan = [&](const std::multimap<uint8, MissionData>& m) -> bool {
+        const auto r = m.equal_range(level);
+        for (auto it = r.first; it != r.second; ++it) {
+            if (it->second.typeID != Mission::Type::Encounter || it->second.important != important)
+                continue;
+            if (agentCorpID != 0 && it->second.corporationID != 0 && it->second.corporationID != agentCorpID)
+                continue;
+            return true;
+        }
+        return false;
+    };
+    return scan(m_missions) || scan(m_missionsImp);
+}
+
+uint8 MissionDataMgr::ChooseMissionOfferKind(uint8 level, uint8 raceID, bool important, uint32 agentID, uint32 characterID, uint32 agentCorpID, uint8 divisionID)
+{
+    std::vector<uint8> kinds;
+    std::vector<CourierData> probe;
+
+    const bool miningDivision = (divisionID == Agents::Division::Mining || divisionID == Agents::Division::MiningNew);
+    if (miningDivision && HasMiningTemplates(level, important)) {
+        kinds.push_back(Mission::Type::Mining);
+    } else {
+        if (BuildCourierTemplateVector(level, raceID, important, agentID, characterID, agentCorpID, probe))
+            kinds.push_back(Mission::Type::Courier);
+        if (HasMiningTemplates(level, important))
+            kinds.push_back(Mission::Type::Mining);
+        if (HasEncounterTemplates(level, important, agentCorpID))
+            kinds.push_back(Mission::Type::Encounter);
+    }
+
+    if (kinds.empty()) {
+        if (BuildCourierTemplateVector(level, raceID, important, agentID, characterID, agentCorpID, probe))
+            return Mission::Type::Courier;
+        return Mission::Type::Courier;
+    }
+    return kinds[static_cast<size_t>(MakeRandomInt(0, static_cast<uint32_t>(kinds.size() - 1)))];
+}
+
+void MissionDataMgr::CreateMissionOffer(uint8 typeID, uint8 level, uint8 raceID, bool important, uint32 agentID, uint32 characterID, MissionOffer& data, uint32 agentCorpID)
 {
     // variable mission data based on agent, init to 0 here.
     data.stateID                = Mission::State::Allocated;
@@ -443,6 +598,7 @@ void MissionDataMgr::CreateMissionOffer(uint8 typeID, uint8 level, uint8 raceID,
     data.destinationSystemID    = 0;
     data.dungeonLocationID      = 0;
     data.dungeonSolarSystemID   = 0;
+    data.rewardExtraItemID      = 0;
     data.bookmarks              = new PyList();
 
     /** @todo  this will need to be adjusted for raceID eventually */
@@ -450,21 +606,19 @@ void MissionDataMgr::CreateMissionOffer(uint8 typeID, uint8 level, uint8 raceID,
         case Mission::Type::Courier: {
             CourierData cData = CourierData();
             std::vector<CourierData> cVec;
-            if (important) {
-                auto itr = m_courierImp.equal_range(level);
-                for (auto it = itr.first; it != itr.second; ++it)
-                    cVec.push_back(it->second);
-            } else {
-                auto itr = m_courier.equal_range(level);
-                for (auto it = itr.first; it != itr.second; ++it)
-                    cVec.push_back(it->second);
+            if (!BuildCourierTemplateVector(level, raceID, important, agentID, characterID, agentCorpID, cVec)) {
+                _log(AGENT__ERROR, "CreateMissionOffer: no courier templates for level %u (agentID %u)", level, agentID);
+                data.typeID = Mission::Type::Courier;
+                data.name   = "Invalid Courier Mission";
+                break;
             }
-            cData = cVec[MakeRandomInt(0, (cVec.size() -1))];
-            // verify mission race acceptable
-            if ((cData.raceID) and ((cData.raceID & raceID) != raceID)) {
-                for (auto cur :cVec) {
-                    if ((cur.raceID & raceID) == raceID)
+            cData = cVec[MakeRandomInt(0, (cVec.size() - 1))];
+            if ((cData.raceID) && ((cData.raceID & raceID) != raceID)) {
+                for (auto& cur : cVec) {
+                    if ((cur.raceID & raceID) == raceID) {
                         cData = cur;
+                        break;
+                    }
                 }
             }
 
@@ -496,7 +650,15 @@ void MissionDataMgr::CreateMissionOffer(uint8 typeID, uint8 level, uint8 raceID,
                 for (auto it = itr.first; it != itr.second; ++it)
                     cVec.push_back(it->second);
             }
-            cData = cVec[MakeRandomInt(0, (cVec.size() -1))];
+            if (cVec.empty()) {
+                _log(AGENT__ERROR, "CreateMissionOffer: no mining templates for level %u", level);
+                data.typeID = Mission::Type::Mining;
+                data.name   = "Invalid Mining Mission";
+                break;
+            }
+            if (agentID != 0 && cVec.size() > 1)
+                SliceAgentPool(cVec, agentID, agentCorpID);
+            cData = cVec[MakeRandomInt(0, (cVec.size() - 1))];
 
             data.name               = cData.name;
             data.typeID             = cData.typeID;
@@ -517,6 +679,44 @@ void MissionDataMgr::CreateMissionOffer(uint8 typeID, uint8 level, uint8 raceID,
         case Mission::Type::Tutorial: {
         } break;
         case Mission::Type::Encounter: {
+            std::vector<MissionData> eVec;
+            auto collect = [&](const std::multimap<uint8, MissionData>& m) {
+                const auto r = m.equal_range(level);
+                for (auto it = r.first; it != r.second; ++it) {
+                    if (it->second.typeID != Mission::Type::Encounter || it->second.important != important)
+                        continue;
+                    if (agentCorpID != 0 && it->second.corporationID != 0 && it->second.corporationID != agentCorpID)
+                        continue;
+                    eVec.push_back(it->second);
+                }
+            };
+            collect(m_missions);
+            collect(m_missionsImp);
+            if (eVec.empty()) {
+                _log(AGENT__ERROR, "CreateMissionOffer: no encounter templates for level %u", level);
+                data.typeID = Mission::Type::Encounter;
+                data.name   = "Invalid Encounter Mission";
+                break;
+            }
+            if (agentID != 0 && eVec.size() > 1)
+                SliceAgentPool(eVec, agentID, agentCorpID);
+            const MissionData& md = eVec[static_cast<size_t>(MakeRandomInt(0, static_cast<uint32_t>(eVec.size() - 1)))];
+            data.name               = md.name;
+            data.typeID             = Mission::Type::Encounter;
+            data.bonusISK           = md.bonusISK;
+            data.rewardISK          = md.rewardISK;
+            data.bonusTime          = md.bonusTime;
+            data.important          = md.important;
+            data.storyline          = false;
+            data.missionID          = md.missionID;
+            data.briefingID         = md.briefingID;
+            data.rewardItemID       = md.rewardItemID;
+            data.rewardItemQty      = md.rewardItemQty;
+            data.courierTypeID      = 0;
+            data.courierAmount      = 0;
+            data.courierItemVolume  = 0;
+            data.range              = md.range;
+            data.dungeonLocationID  = md.dungeonID;
         } break;
         case Mission::Type::Trade: {
         } break;
@@ -576,6 +776,15 @@ std::string MissionDataMgr::GetTypeLabel(uint8 typeID)
         case Burner:            return "UI/Agents/MissionTypes/Burner";
         default:                return "Invalid";
     }
+}
+
+std::string MissionDataMgr::GetTypeLabelForAgent(uint32 agentID, uint8 typeID) {
+    (void)agentID;
+    // Journal expects a localization *path* (GetByLabel), not display text. A raw
+    // string like "Gangster" becomes [no label: Gangster] on the client. To show
+    // a custom name, add UI/Agents/MissionTypes/... to the client's message DB
+    // (or liveupdate) then return that full path for the agent you care about.
+    return GetTypeLabel(typeID);
 }
 
 void MissionDataMgr::UpdateMissionData(uint32 charID, MissionOffer& data)

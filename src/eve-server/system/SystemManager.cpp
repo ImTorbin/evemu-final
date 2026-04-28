@@ -277,6 +277,30 @@ bool SystemManager::ProcessTic() {
     return SystemActivity();
 }
 
+void SystemManager::ProcessDynamicDestiny() {
+    if (!m_loaded)
+        return;
+
+    std::map<uint32, SystemEntity*>::iterator itr = m_ticEntities.begin();
+    uint32 mLast(0);
+    while (itr != m_ticEntities.end()) {
+        if (mLast >= itr->first) {
+            ++itr;
+            continue;
+        }
+        mLast = itr->first;
+        SystemEntity* pSE = itr->second;
+        if (pSE != nullptr && pSE->DestinyMgr() != nullptr)
+            pSE->DestinyMgr()->ProcessHighFreqState();
+        if (m_entityChanged) {
+            m_entityChanged = false;
+            itr = m_ticEntities.begin();
+            continue;
+        }
+        ++itr;
+    }
+}
+
 bool SystemManager::SystemActivity() {
     if (m_activityTime == 0)
         return true;
@@ -1401,7 +1425,7 @@ void SystemManager::SendStaticBall(SystemEntity* pSE)
         if (pSE->SysBubble() != nullptr) { //Don't attempt to log if bubble is null (ie, on static structure initial launch)
             GPoint bCenter(pSE->SysBubble()->GetCenter());
             _log(DESTINY__MESSAGE, "SystemManager::SendStaticBall() - Adding static entity %s(%u) to bubble %u.  Dist to center: %.2f", \
-            pSE->GetName(), pSE->GetID(), pSE->SysBubble()->GetID(), bCenter.distance(pSE->GetPosition()));
+            pSE->GetName(), pSE->GetID(), pSE->SysBubble()->GetID(), bCenter.distance(pSE->GetAuthPosition()));
         }
     }
 
@@ -1512,46 +1536,74 @@ SystemEntity* SystemManager::GetPlanet(uint32 planetID)
 
 uint32 SystemManager::GetClosestPlanetID(const GPoint& myPos)
 {
+    if (m_planetMap.empty())
+        return 0;
+
     std::map<double, SystemEntity*> sorted;
-    for (auto cur : m_planetMap)
-        sorted.insert(std::pair<double, SystemEntity*>(myPos.distance(cur.second->GetPosition()), cur.second));
+    for (auto cur : m_planetMap) {
+        if (cur.second == nullptr)
+            continue;
+        sorted.insert(std::pair<double, SystemEntity*>(myPos.distance(cur.second->GetAuthPosition()), cur.second));
+    }
 
-    std::map<double, SystemEntity*>::iterator itr = sorted.begin();
+    if (sorted.empty())
+        return 0;
 
-    return itr->second->GetID();
+    return sorted.begin()->second->GetID();
 }
 
 SystemEntity* SystemManager::GetClosestPlanetSE(const GPoint& myPos)
 {
+    if (m_planetMap.empty())
+        return nullptr;
+
     std::map<double, SystemEntity*> sorted;
-    for (auto cur : m_planetMap)
-        sorted.insert(std::pair<double, SystemEntity*>(myPos.distance(cur.second->GetPosition()), cur.second));
+    for (auto cur : m_planetMap) {
+        if (cur.second == nullptr)
+            continue;
+        sorted.insert(std::pair<double, SystemEntity*>(myPos.distance(cur.second->GetAuthPosition()), cur.second));
+    }
 
-    std::map<double, SystemEntity*>::iterator itr = sorted.begin();
+    if (sorted.empty())
+        return nullptr;
 
-    return itr->second;
+    return sorted.begin()->second;
 }
 
 SystemEntity* SystemManager::GetClosestGateSE(const GPoint& myPos)
 {
+    if (m_gateMap.empty())
+        return nullptr;
+
     std::map<double, SystemEntity*> sorted;
-    for (auto cur : m_gateMap)
-        sorted.insert(std::pair<double, SystemEntity*>(myPos.distance(cur.second->GetPosition()), cur.second));
+    for (auto cur : m_gateMap) {
+        if (cur.second == nullptr)
+            continue;
+        sorted.insert(std::pair<double, SystemEntity*>(myPos.distance(cur.second->GetAuthPosition()), cur.second));
+    }
 
-    std::map<double, SystemEntity*>::iterator itr = sorted.begin();
+    if (sorted.empty())
+        return nullptr;
 
-    return itr->second;
+    return sorted.begin()->second;
 }
 
 SystemEntity* SystemManager::GetClosestMoonSE(const GPoint& myPos)
 {
+    if (m_moonMap.empty())
+        return nullptr;
+
     std::map<double, SystemEntity*> sorted;
-    for (auto cur : m_moonMap)
-        sorted.insert(std::pair<double, SystemEntity*>(myPos.distance(cur.second->GetPosition()), cur.second));
+    for (auto cur : m_moonMap) {
+        if (cur.second == nullptr)
+            continue;
+        sorted.insert(std::pair<double, SystemEntity*>(myPos.distance(cur.second->GetAuthPosition()), cur.second));
+    }
 
-    std::map<double, SystemEntity*>::iterator itr = sorted.begin();
+    if (sorted.empty())
+        return nullptr;
 
-    return itr->second;
+    return sorted.begin()->second;
 }
 
 void SystemManager::GetClientList(std::vector< Client* >& cVec)
@@ -1578,6 +1630,8 @@ void SystemManager::DScan(int64 range, const GPoint& pos, std::vector<SystemEnti
      * AttrDScanImmune is from rhea expansion.  may be able to implement here.
      */
     for (auto cur : m_entities) {
+        if (cur.second == nullptr)
+            continue;
         // these dont show on dscan
         if (IsTempItem(cur.first))
             continue;
@@ -1598,7 +1652,7 @@ void SystemManager::DScan(int64 range, const GPoint& pos, std::vector<SystemEnti
             if (cur.second->DestinyMgr()->IsCloaked())
                 continue;
         // made it this far.  add item to scan list
-        if (pos.distance(cur.second->GetPosition()) < range)
+        if (pos.distance(cur.second->GetAuthPosition()) < range)
             vector.push_back(cur.second);
     }
 }
@@ -1632,6 +1686,17 @@ void SystemManager::GetAllEntities(std::vector< CosmicSignature >& vector)
     /** @todo this will need to put entity's sigID into anomaly map for Scan::WarpTo object */
     /** @todo this should be updated/current/correct in system's AnomalyMgr.  try to get data from there for this list  */
     for (auto cur : m_ticEntities) {
+        if (cur.second == nullptr)
+            continue;
+        // Wrecks are Celestial category but must not appear as cosmic anomalies/signatures
+        // in system scan (matches live: wrecks are overview/D-scan, not probe results).
+        if (cur.second->IsWreckSE())
+            continue;
+        if (cur.second->GetGroupID() == EVEDB::invGroups::Wreck)
+            continue;
+        if (AnomalyMgr::IsWreckLikeTypeID(cur.second->GetTypeID()))
+            continue;
+
         CosmicSignature sig = CosmicSignature();
         sig.dungeonType = Dungeon::Type::Anomaly;
         sig.ownerID = cur.second->GetOwnerID();
@@ -1639,7 +1704,7 @@ void SystemManager::GetAllEntities(std::vector< CosmicSignature >& vector)
         sig.sigItemID = cur.first;
         sig.sigStrength = 0.9f; // these arent warpable yet
         sig.systemID = m_data.systemID;
-        sig.position = cur.second->GetPosition();
+        sig.position = cur.second->GetAuthPosition();
         sig.sigGroupID = cur.second->GetGroupID();      // result.groupID
         sig.sigTypeID = cur.second->GetTypeID();        // result.typeID
         // if scanGroupID is anom or sig, use scanAttributeID to determine site type (in client code)

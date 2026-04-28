@@ -60,3 +60,17 @@ sql/base/
 
 sql/migrations/
     contains versioned migrations scripts in plaintext (for easier versioning). We will apply them in order.
+
+## Troubleshooting: `unknown migration in database` (EVEDBTool `up`)
+
+That error means the `migrations` table has at least one **Id** that does not match any migration file name under `migrations-dir` (see `evedb.yaml`). Typical causes: the database was migrated on another branch, a file was renamed after being applied, or a row was inserted manually.
+
+1. Inspect applied rows (from the host, adjust password if needed):
+
+   `docker compose exec db mariadb -uevemu -pevemu evemu -e "SELECT * FROM migrations ORDER BY 1;"`
+
+2. List files in the image/repo: `sql/migrations/*.sql` — each **file base name** (without path) must correspond to an **Id** in the table, and vice versa for applied migrations.
+
+3. If you find a row whose **Id** has no matching file, remove that row only after confirming the schema already matches what that migration would have done, e.g. `DELETE FROM migrations WHERE Id = 'the_orphan_id';` then run `evedbtool up` again.
+
+4. See also `evedbtool status` and `evedbtool skip` (use with care; `skip` advances the recorded version without running SQL).

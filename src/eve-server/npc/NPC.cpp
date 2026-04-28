@@ -35,12 +35,15 @@
 #include "system/Container.h"
 #include "system/Damage.h"
 #include "system/SystemManager.h"
+#include "StaticDataMgr.h"
+#include "../eve-common/EVE_Corp.h"
 
 
-NPC::NPC(InventoryItemRef self, EVEServiceManager& services, SystemManager* system, const FactionData& data, SpawnMgr* spawnMgr)
+NPC::NPC(InventoryItemRef self, EVEServiceManager& services, SystemManager* system, const FactionData& data, SpawnMgr* spawnMgr, bool anomalyCommanderLoot)
 : DynamicSystemEntity(self, services, system),
 m_spawnMgr(spawnMgr),
-m_AI(new NPCAIMgr(this))
+m_AI(new NPCAIMgr(this)),
+m_anomalyCommanderLoot(anomalyCommanderLoot)
 {
     m_allyID = data.allianceID;
     m_warID = data.factionID;
@@ -57,7 +60,15 @@ m_AI(new NPCAIMgr(this))
     m_self->SetAttribute(AttrVolume,              m_self->type().volume(), false);
     m_self->SetAttribute(AttrCapacity,            m_self->type().capacity(), false);
     m_self->SetAttribute(AttrShieldCharge,        m_self->GetAttribute(AttrShieldCapacity), false);
-    m_self->SetAttribute(AttrCapacitorCharge,     m_self->GetAttribute(AttrCapacitorCapacity), false);
+
+    /** Many NPC types omit capacitor attrs in SDE — player nos/neut mechanics still need a pool to drain from.
+     *  Treat unspecified capacity as a full generic bank so vamp/neut resolves against a non-zero reservoir. */
+    EvilNumber npcCapBank(m_self->GetAttribute(AttrCapacitorCapacity));
+    if (npcCapBank.get_double() < 1.0) {
+        npcCapBank = EvilNumber(5000.0);
+        m_self->SetAttribute(AttrCapacitorCapacity, npcCapBank, false);
+    }
+    m_self->SetAttribute(AttrCapacitorCharge, m_self->GetAttribute(AttrCapacitorCapacity), false);
 
     /* Gets the value from the NPC and put on our own vars */
     m_emDamage = m_self->GetAttribute(AttrEmDamage).get_float(),
@@ -123,15 +134,19 @@ void NPC::EncodeDestiny( Buffer& into )
 {
     using namespace Destiny;
 
-    uint8 mode = m_destiny->GetState(); //Ball::Mode::STOP;
+    uint8 mode = m_destiny->GetState();
+    if (mode != Ball::Mode::WARP && mode != Ball::Mode::FOLLOW && mode != Ball::Mode::ORBIT
+            && mode != Ball::Mode::GOTO && mode != Ball::Mode::STOP)
+        mode = Ball::Mode::STOP;
 
+    const GPoint bh(m_destiny != nullptr ? m_destiny->GetPosition() : GetPosition());
     BallHeader head = BallHeader();
         head.entityID = GetID();
         head.mode = mode;
         head.radius = GetRadius();
-        head.posX = x();
-        head.posY = y();
-        head.posZ = z();
+        head.posX = bh.x;
+        head.posY = bh.y;
+        head.posZ = bh.z;
         head.flags = Ball::Flag::IsMassive | Ball::Flag::IsFree;
     into.Append( head );
     MassSector mass = MassSector();
@@ -158,10 +173,9 @@ void NPC::EncodeDestiny( Buffer& into )
                 warp.targY = target.y;
                 warp.targZ = target.z;
                 warp.speed = m_destiny->GetWarpSpeed();       //ship warp speed x10  (dont ask...this is what it is...more dumb ccp shit)
-                // warp timing.  see Ship::EncodeDestiny() for notes/updates
-                warp.effectStamp = -1; //m_destiny->GetStateStamp();   //timestamp when warp started
-                warp.followRange = 0;   //this isnt right
-                warp.followID = 0;  //this isnt right
+                warp.effectStamp = static_cast<int32>(m_destiny->GetStateStamp());
+                warp.followRange = WARP_SNAPSHOT_FOLLOW_RANGE;
+                warp.followID = WARP_SNAPSHOT_FOLLOW_ID;
             into.Append( warp );
         }  break;
         case Ball::Mode::FOLLOW: {
@@ -360,7 +374,34 @@ void NPC::Killed(Damage &damage) {
                 GetName(), GetID(), x(), y(), z(), wreckItemRef->name(), wreckItemRef->itemID(), wreckPosition.x, wreckPosition.y, wreckPosition.z);
 
     if ((MakeRandomFloat() < sConfig.npc.LootDropChance) or (m_allyID == factionRogueDrones))
-        DropLoot(wreckItemRef, m_self->groupID(), killerID);
+        DropLoot(wreckItemRef, m_self->groupID(), killerID, pClient != nullptr);
+
+    uint32 lootFac = 0;
+    bool commanderBonus = m_anomalyCommanderLoot;
+    if (!commanderBonus)
+        commanderBonus = sDataMgr.GetFactionCommanderBonusLootFaction(m_self->typeID(), lootFac);
+    else
+        lootFac = m_warID ? m_warID : factionRogueDrones;
+
+    if (commanderBonus && killerID) {
+        if (!lootFac)
+            lootFac = m_warID ? m_warID : factionRogueDrones;
+        std::vector<LootList> bonus;
+        sDataMgr.BuildAnomalyCommanderBonusLoot(lootFac, bonus);
+        for (const auto& loot : bonus) {
+            if (!sDataMgr.HasType(loot.itemID))
+                continue;
+            uint32 qty = loot.minDrop;
+            if (loot.minDrop != loot.maxDrop)
+                qty = static_cast<uint32>(MakeRandomInt(loot.minDrop, loot.maxDrop));
+            if (qty == 0)
+                qty = 1;
+            ItemData iLoot(loot.itemID, killerID, wreckItemRef->itemID(), flagNone, qty);
+            InventoryItemRef addRef = sItemFactory.SpawnItem(iLoot);
+            if (addRef.get() != nullptr)
+                wreckItemRef->AddItem(addRef);
+        }
+    }
 
     DBSystemDynamicEntity wreckEntity = DBSystemDynamicEntity();
         wreckEntity.allianceID = (killer->GetAllianceID() == 0 ? m_allyID : killer->GetAllianceID());

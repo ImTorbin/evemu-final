@@ -41,7 +41,9 @@ NetService::NetService(EVEServiceManager& mgr) :
 }
 
 PyResult NetService::GetTime(PyCallArgs &call) {
-    return new PyLong(GetFileTimeNow());
+    /* Use int64 FILETIME ticks; double cannot represent every 100ns step (~1e17) → PyLong clipped
+     * values diverge from OnModuleAttributeChange / godma long timestamps (negative time deltas, tau=0). */
+    return new PyLong(GetFileTimeNowInt64());
 }
 
 PyResult NetService::GetClusterSessionStatistics(PyCallArgs &call)

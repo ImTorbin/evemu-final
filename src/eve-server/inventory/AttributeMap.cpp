@@ -30,8 +30,28 @@
 #include "Client.h"
 #include "EntityList.h"
 #include "StaticDataMgr.h"
+#include "inventory/AttributeEnum.h"
 #include "inventory/AttributeMap.h"
 #include "inventory/InventoryItem.h"
+
+
+namespace {
+
+/** Bypass IsLogin flooding + Destiny queue discard for HUD-critical ship attrs — see ShipItem::SanitizeSimulatorRechargeAttributes,
+ * Damage.cpp shield/armor/hull pools. AttrDamage bypass is ship-only (modules use AttrDamage as module wear/crystals). */
+bool BypassLoginHudSimulatorAttributes(uint16 attrID, const InventoryItem& item)
+{
+    if (attrID == AttrRechargeRate || attrID == AttrShieldRechargeRate
+        || attrID == AttrShieldRechargeRateMultiplier || attrID == AttrCapacitorRechargeRateMultiplier
+        || attrID == AttrRechargeRateMultiplier
+        || attrID == AttrShieldCharge || attrID == AttrArmorDamage || attrID == AttrCapacitorCharge)
+        return true;
+    if (attrID == AttrDamage && item.categoryID() == EVEDB::invCategories::Ship)
+        return true;
+    return false;
+}
+
+} // namespace
 
 
 /*
@@ -372,7 +392,7 @@ bool AttributeMap::Change(uint16 attrID, EvilNumber& old_val, EvilNumber& new_va
     }
 
         modChange.attributeID = attrID;
-        modChange.time = GetFileTimeNow();
+        modChange.time = GetFileTimeNowInt64();
         modChange.newValue = new_val.GetPyObject();
         modChange.oldValue = old_val.GetPyObject();
         /*  not sure about this one yet, used in cap charge (more?)....oldValue is list for this server rsp
@@ -390,7 +410,7 @@ bool AttributeMap::Change(uint16 attrID, EvilNumber& old_val, EvilNumber& new_va
                       [PyFloat 104400]                  <<- recharge time ??
                       [PyFloat 4860]                    <<-  ??
         */
-    return SendChanges(modChange.Encode());
+    return SendChanges(modChange.Encode(), BypassLoginHudSimulatorAttributes(attrID, mItem));
 }
 
 bool AttributeMap::Add(uint16 attrID, EvilNumber& num) {
@@ -422,13 +442,13 @@ bool AttributeMap::Add(uint16 attrID, EvilNumber& num) {
     }
 
         modChange.attributeID = attrID;
-        modChange.time = GetFileTimeNow();
+        modChange.time = GetFileTimeNowInt64();
         modChange.newValue = num.GetPyObject();
         modChange.oldValue = PyStatic.NewNone();
-    return SendChanges(modChange.Encode());
+    return SendChanges(modChange.Encode(), BypassLoginHudSimulatorAttributes(attrID, mItem));
 }
 
-bool AttributeMap::SendChanges(PyTuple* attrChange) {
+bool AttributeMap::SendChanges(PyTuple* attrChange, bool bypassLoginHudSim /*false*/) {
     if (attrChange == nullptr)
         return true;
 
@@ -445,23 +465,28 @@ bool AttributeMap::SendChanges(PyTuple* attrChange) {
         }
     }
 
-    if (IsCorp(mItem.ownerID()))
-        return true;
-
     Client* pClient(nullptr);
     if (IsCharacterID(mItem.itemID())) {
         pClient = sEntityList.FindClientByCharID(mItem.itemID());
+    } else if (Client* const pilot = mItem.GetPilot()) {
+        /* Corp-owned ships: ownerID is a corporation ID, so FindClientByCharID(owner) fails and the old
+         * IsCorp(owner) early return blocked OnModuleAttributeChange to the flying pilot — combat text
+         * still worked via ShipSE::GetPilot(), but shield/armor/cap HUD did not update. */
+        pClient = pilot;
     } else {
         pClient = sEntityList.FindClientByCharID(mItem.ownerID());
     }
 
     if (pClient == nullptr) {
+        if (IsCorp(mItem.ownerID()))
+            return true;
         _log(PLAYER__WARNING, "AttributeMap::SendChanges() - ownerID for %u not found", mItem.itemID() );
         return false;
     }
 
-    // avoid flooding the client on login
-    if (pClient->IsLogin())
+    /* During login many attributes change; flooding is skipped. Recharge + shield/armor/cap pool attrs are
+     * required for HUD/godma — if dropped here, gauges can stay stale while combat log still shows hits. */
+    if (pClient->IsLogin() && !bypassLoginHudSim)
         return true;
 
     if (is_log_enabled(ATTRIBUTE__CHANGE)) {
@@ -469,9 +494,30 @@ bool AttributeMap::SendChanges(PyTuple* attrChange) {
         attrChange->Dump(ATTRIBUTE__CHANGE, "");
     }
 
-    pClient->QueueDestinyEvent(&attrChange);
+    PyTuple* evt(attrChange);
 
-    //Save();
+    /* OnItemChange multicast still uses corp ownerID above. For the flying pilot,
+     * godma applies pool deltas when ownerID matches session character — corp IDs never match. */
+    if ((not IsCharacterID(mItem.ownerID())) && (pClient == mItem.GetPilot()) && (evt != nullptr)
+        && evt->size() > 1u) {
+        PyRep* const clonedRep(evt->Clone());
+        if (clonedRep != nullptr && clonedRep->IsTuple()) {
+            PyTuple* const clone(clonedRep->AsTuple());
+            clone->SetItemInt(1, pClient->GetCharacterID());
+            PyDecRef(evt);
+            evt = clone;
+        } else if (clonedRep != nullptr) {
+            PyDecRef(clonedRep);
+        }
+    }
+
+    /* OnModuleAttributeChange is normally queued then flushed via DoDestinyUpdate / OnMultiEvent.
+     * While SetState has not completed, _SendQueuedUpdates() discards queued events unless we emit
+     * immediately here (see also Client::QueueDestinyEvent destiny-queue drop path). */
+    if (bypassLoginHudSim && pClient->DestinyQueuesCurrentlyDropped())
+        pClient->EmitDestinyEventImmediate(evt);
+    else
+        pClient->QueueDestinyEvent(&evt);
 
     return true;
 }

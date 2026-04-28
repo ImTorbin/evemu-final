@@ -23,8 +23,11 @@
 #include "system/cosmicMgrs/DungeonMgr.h"
 #include "system/cosmicMgrs/SpawnMgr.h"
 #include "system/cosmicMgrs/WormholeMgr.h"
+#include "system/SystemEntity.h"
 
 #include "../../../eve-common/EVE_Scanning.h"
+#include "../../../eve-common/tables/invGroups.h"
+
 
 /*  this class will keep track of all Anomalies for its system
  *.   the scan system will query this class for current anomaly data
@@ -69,6 +72,44 @@ m_initalized(false)
 {
     m_sigBySigID.clear();
     m_sigByItemID.clear();
+}
+
+bool AnomalyMgr::IsWreckLikeTypeID(uint16 typeID)
+{
+    if (typeID == 0)
+        return false;
+    Inv::TypeData td;
+    sDataMgr.GetType(typeID, td);
+    if (td.groupID == EVEDB::invGroups::Wreck)
+        return true;
+    const std::string& tn = td.name;
+    if (tn.size() >= 6u and tn.compare(tn.size() - 6u, 6u, " Wreck") == 0)
+        return true;
+    return false;
+}
+
+bool AnomalyMgr::IsExcludedFromCosmicScanResults(const CosmicSignature& sig, const SystemManager* sys)
+{
+    if (sig.sigGroupID == EVEDB::invGroups::Wreck)
+        return true;
+    if (IsWreckLikeTypeID(sig.sigTypeID))
+        return true;
+    if (sig.sigItemID != 0) {
+        if (sys != nullptr) {
+            SystemEntity* se = sys->GetSE(sig.sigItemID);
+            if (se != nullptr and se->IsWreckSE())
+                return true;
+        }
+        InventoryItemRef ir = sItemFactory.GetItemRef(sig.sigItemID);
+        if (ir.get() != nullptr and ir->groupID() == EVEDB::invGroups::Wreck)
+            return true;
+        if (ir.get() != nullptr and IsWreckLikeTypeID(ir->typeID()))
+            return true;
+    }
+    const std::string& n = sig.sigName;
+    if (n.size() >= 6u and n.compare(n.size() - 6u, 6u, " Wreck") == 0)
+        return true;
+    return false;
 }
 
 AnomalyMgr::~AnomalyMgr()
@@ -168,16 +209,24 @@ void AnomalyMgr::Process() {
     if (!m_initalized)
         return;
     if (m_procTimer.Check(/*!sConfig.debug.IsTestServer*/)) {
-        // Only generate new signals when a player is in the system
-        if (m_system->PlayerCount() > 0 && m_typeList.size () > 0) {
-            auto cur = m_typeList.begin();
-            auto end = m_typeList.end();
-
-            for (; cur != end; cur++) {
-                CreateAnomaly (*cur);
+        // Prefer client map: PlayerCount() can desync; anomalies never spawned if it stayed 0.
+        const bool clientsPresent = m_system->HasClientsInSystem() || m_system->PlayerCount() > 0;
+        if (clientsPresent) {
+            if (m_typeList.empty() && !m_firstSpawn) {
+                // Initial wave cleared m_typeList and nothing refilled — repopulate on the normal proc interval.
+                const size_t sigTotal = m_anomByItemID.size() + m_sigByItemID.size();
+                if (sigTotal < static_cast<size_t>(m_maxSigs) * 3u) {
+                    const uint8 batch = sConfig.debug.IsTestServer ? 2 : 1;
+                    for (uint8 i = 0; i < batch; ++i)
+                        m_typeList.push_back(GetDungeonType());
+                    m_typeList.push_back(Dungeon::Type::Anomaly);
+                }
             }
-
-            m_typeList.clear();
+            if (!m_typeList.empty()) {
+                for (auto cur = m_typeList.begin(); cur != m_typeList.end(); ++cur)
+                    CreateAnomaly(*cur);
+                m_typeList.clear();
+            }
         }
         // Once initial spawn is complete, set correct timer based upon whether this is test server or not
         if (m_firstSpawn) {
@@ -224,6 +273,12 @@ void AnomalyMgr::LoadAnomalies() {
         sig.position.y = row.GetDouble(10);
         sig.position.z = row.GetDouble(11);
 
+        if (IsExcludedFromCosmicScanResults(sig, m_system)) {
+            _log(COSMIC_MGR__WARNING, "LoadAnomalies() - skipping wreck-like cosmic row %s itemID %u (not probe-scan).",
+                sig.sigName.c_str(), sig.sigItemID);
+            continue;
+        }
+
         // Register loaded signatures
         m_dungMgr->MakeDungeon(sig);
         m_sigBySigID.emplace(sig.sigID, sig);
@@ -263,15 +318,29 @@ void AnomalyMgr::GetSignatureList(std::vector<CosmicSignature>& sig)
 {
     // sysSignatures (sigID,sigItemID,dungeonType,sigName,systemID,sigTypeID,sigGroupID,scanGroupID,scanAttributeID,x,y,z)
     // retrieval method for scan queries
-    for (auto cur : m_sigByItemID)
-        sig.push_back(cur.second);
+    std::vector<uint32> junk;
+    for (const auto& cur : m_sigByItemID) {
+        if (IsExcludedFromCosmicScanResults(cur.second, m_system))
+            junk.push_back(cur.first);
+        else
+            sig.push_back(cur.second);
+    }
+    for (uint32 itemID : junk)
+        RemoveSignal(itemID);
 }
 
 void AnomalyMgr::GetAnomalyList(std::vector<CosmicSignature>& sig) {
     // sysSignatures (sigID,sigItemID,dungeonType,sigName,systemID,sigTypeID,sigGroupID,scanGroupID,scanAttributeID,x,y,z)
     // retrieval method for scan queries
-    for (auto cur : m_anomByItemID)
-        sig.push_back(cur.second);
+    std::vector<uint32> junk;
+    for (const auto& cur : m_anomByItemID) {
+        if (IsExcludedFromCosmicScanResults(cur.second, m_system))
+            junk.push_back(cur.first);
+        else
+            sig.push_back(cur.second);
+    }
+    for (uint32 itemID : junk)
+        RemoveSignal(itemID);
 }
 
 void AnomalyMgr::CreateAnomaly(int8 typeID)
@@ -419,6 +488,39 @@ void AnomalyMgr::RegisterExitWH(CosmicSignature &sig)
             sig.sigName.c_str(), m_system->GetName(), sig.systemID, sig.bubbleID, sig.sigStrength *100);
 }
 
+void AnomalyMgr::SpawnEscalationAt(const GPoint& nearPos, uint32 ownerID)
+{
+    if (!m_initalized || m_dungMgr == nullptr)
+        return;
+    if (!sConfig.cosmic.AnomalyEnabled || !sConfig.cosmic.DungeonEnabled)
+        return;
+
+    CosmicSignature sig = CosmicSignature();
+    sig.systemID = m_system->GetID();
+    sig.sigID = sEntityList.GetAnomalyID();
+    sig.sigItemID = 0;
+    sig.sigName = "Escalation Site";
+    sig.sigStrength = 0.0125f;
+    sig.ownerID = ownerID ? ownerID : factionRogueDrones;
+    sig.dungeonType = Dungeon::Type::Escalation;
+    sig.sigTypeID = EVEDB::invTypes::DeadspaceSignature;
+    sig.sigGroupID = EVEDB::invGroups::Cosmic_Signature;
+    sig.scanGroupID = Scanning::Group::Signature;
+    sig.scanAttributeID = AttrScanAllStrength;
+    sig.position = nearPos;
+    sig.position.MakeRandomPointOnSphere(MakeRandomInt(15, 60) * 1000.0);
+
+    if (!m_dungMgr->MakeDungeon(sig))
+        return;
+
+    m_sigBySigID.emplace(sig.sigID, sig);
+    m_sigByItemID.emplace(sig.sigItemID, sig);
+    ++m_Sigs;
+
+    _log(COSMIC_MGR__MESSAGE, "AnomalyMgr::SpawnEscalationAt - Escalation signature %s item %u in %s(%u).",
+        sig.sigID.c_str(), sig.sigItemID, m_system->GetName(), m_system->GetID());
+}
+
 uint8 AnomalyMgr::GetDungeonType()
 {
     uint8 typeID = MakeRandomInt(2,10); // skip typeMission
@@ -518,6 +620,13 @@ void AnomalyMgr::AddSignal(SystemEntity* pSE, uint32 id/*0*/)
     InventoryItemRef iRef = pSE->GetSelf();
     if (iRef.get() == nullptr)
         return; // we'll get over it.
+    // Match live + SystemManager::GetAllEntities: wrecks are not cosmic scan results.
+    if (pSE->IsWreckSE())
+        return;
+    if (iRef->groupID() == EVEDB::invGroups::Wreck)
+        return;
+    if (IsWreckLikeTypeID(iRef->typeID()))
+        return;
     CosmicSignature sig = CosmicSignature();
         sig.dungeonType = Dungeon::Type::Anomaly;
         sig.ownerID = iRef->ownerID();
@@ -614,6 +723,8 @@ void AnomalyMgr::RemoveSignal(uint32 itemID)
             if (itr2 != m_sigBySigID.end())
                 m_sigBySigID.erase(itr2);
             m_anomByItemID.erase(itr);
+            if (m_Anoms > 0)
+                --m_Anoms;
         }
     }
 }

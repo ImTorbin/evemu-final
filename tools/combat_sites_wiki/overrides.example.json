@@ -1,0 +1,4 @@
+{
+  "_comment": "Map wiki/ingame display name (any case) to typeID. Keys are normalized to lowercase.",
+  "example ship name": 642
+}

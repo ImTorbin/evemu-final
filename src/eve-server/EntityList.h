@@ -172,6 +172,7 @@ protected:
 
 private:
     Timer m_stampTimer;
+    Timer m_dynamicDestinyTimer;
     Timer m_minuteTimer;
     Timer m_targTimer;
 

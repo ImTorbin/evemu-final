@@ -106,6 +106,8 @@ PyRep *ConfigDB::GetMultiOwnersEx(const std::vector<int32> &entityIDs) {
 
     if (player.size()) {
         ListToINString(player, ids);
+        // High-ID mission agents (agtAgents + chrNPCCharacters) are not in chrCharacters; without this union
+        // config::GetMultiOwnersEx returns no row and the client EveOwners cache fails (unpack error).
         if (!sDatabase.RunQuery(res,
             "SELECT "
             "  characterID AS ownerID,"
@@ -114,7 +116,14 @@ PyRep *ConfigDB::GetMultiOwnersEx(const std::vector<int32> &entityIDs) {
             "  gender,"
             "  NULL AS ownerNameID"
             " FROM chrCharacters"
-            " WHERE characterID IN (%s)", ids.c_str()))
+            " WHERE characterID IN (%s)"
+            " UNION"
+            " SELECT n.characterID, n.characterName, n.typeID, n.gender, NULL"
+            " FROM chrNPCCharacters AS n"
+            " INNER JOIN agtAgents AS a ON a.agentID = n.characterID"
+            " WHERE n.characterID IN (%s)"
+            " AND NOT EXISTS (SELECT 1 FROM chrCharacters AS c WHERE c.characterID = n.characterID)",
+            ids.c_str(), ids.c_str()))
         {
             codelog(DATABASE__ERROR, "Error in query: %s", res.error.c_str());
         } else {

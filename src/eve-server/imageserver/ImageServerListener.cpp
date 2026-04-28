@@ -28,12 +28,33 @@
 #include "EVEServerConfig.h"
 #include "imageserver/ImageServerListener.h"
 
+namespace {
+    boost::asio::ip::tcp::endpoint make_image_listen_endpoint()
+    {
+        namespace ip = boost::asio::ip;
+        const uint16 port = sConfig.net.imageServerPort;
+        if (sConfig.net.listenAddress.empty())
+            return ip::tcp::endpoint(ip::tcp::v4(), port);
+
+        boost::system::error_code ec;
+        const ip::address_v4 addr = ip::address_v4::from_string(sConfig.net.listenAddress, ec);
+        if (ec) {
+            sLog.Error("ImageServerListener", "Invalid net.listenAddress '%s': %s — binding 0.0.0.0:%u",
+                sConfig.net.listenAddress.c_str(), ec.message().c_str(), (unsigned)port);
+            return ip::tcp::endpoint(ip::tcp::v4(), port);
+        }
+        sLog.Blue("ImageServerListener", "Image TCP listening on %s:%u", sConfig.net.listenAddress.c_str(), (unsigned)port);
+        return ip::tcp::endpoint(addr, port);
+    }
+}
+
 ImageServerListener::ImageServerListener(boost::asio::io_context& io)
 {
+    const proto::endpoint ep = make_image_listen_endpoint();
 #if BOOST_VERSION >= 107400
-    _acceptor = new boost::asio::basic_socket_acceptor<proto>(io, proto::endpoint(proto::v4(), sConfig.net.imageServerPort));
+    _acceptor = new boost::asio::basic_socket_acceptor<proto>(io, ep);
 #else
-    _acceptor = new proto::acceptor(io, proto::endpoint(proto::v4(), sConfig.net.imageServerPort));
+    _acceptor = new proto::acceptor(io, ep);
 #endif
     StartAccept();
 }

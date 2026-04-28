@@ -976,7 +976,10 @@ PyResult InventoryBound::Build(PyCallArgs &call) {
     stData.corporationID = call.client->GetCorporationID();
 
     // Build station name
-    stData.name = call.client->SystemMgr()->GetClosestPlanetSE(anchorPosition)->GetName()
+    SystemEntity* planetSE = call.client->SystemMgr()->GetClosestPlanetSE(anchorPosition);
+    if (planetSE == nullptr)
+        throw CustomError("No planets in this system; cannot create outpost.");
+    stData.name = planetSE->GetName()
         + std::string(" - ") + stationBaseName;
 
     // Set default configurable values
@@ -990,7 +993,10 @@ PyResult InventoryBound::Build(PyCallArgs &call) {
     stData.reprocessingStationsTake = 0.05;
 
     // Set space values
-    stData.orbitID = call.client->SystemMgr()->GetClosestPlanetID(anchorPosition);
+    uint32 orbitPlanetID = call.client->SystemMgr()->GetClosestPlanetID(anchorPosition);
+    if (orbitPlanetID == 0)
+        throw CustomError("No planets in this system; cannot set outpost orbit.");
+    stData.orbitID = orbitPlanetID;
 
     // Calculate service mask (temporarily, allow everything)
     stData.serviceMask = Station::ReprocessingPlant                        

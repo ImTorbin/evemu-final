@@ -77,7 +77,10 @@ extern std::string Win32TimeToString(int64 win32t);
 
 // returns delta between time and now, in hours
 int32 GetElapsedHours(int64 time);
-// this returns 100 nanosecond resolution in filetime format
+// Monotonic Win32 FILETIME (100-ns since 1601) as int64 — use for packet `long` time fields (godma/damage).
+// Double cannot represent every 100-ns step at ~1e17 magnitude; client Python float math then breaks deltas / tau.
+int64 GetFileTimeNowInt64();
+// this returns 100 nanosecond resolution in filetime format (double; prefer int64 for wire times)
 double GetFileTimeNow();        // replacement for Win32TimeNow()
 double GetRelativeFileTime(int days=0, int hours=0, int minutes=0, int seconds=0);
 //  this returns milliseconds

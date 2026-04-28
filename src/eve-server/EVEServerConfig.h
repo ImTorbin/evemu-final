@@ -63,6 +63,8 @@ public:
         uint8 MaxThreadReport;
         uint8 BountyPayoutTimer;
         uint16 idleSleepTime;
+        /// Interval (ms) for ProcessDynamicDestiny (~non-pilot subwarp/orbit/FOLLOW). Higher rate = smoother observers; costs CPU/network.
+        uint16 DynamicDestinyMs;
         uint16 maxPlayers;
         float processTic;
         float ModuleDamageChance;
@@ -207,6 +209,8 @@ public:
         float TargetPodSec;
         float DefenderMissileChance;
         float LootDropChance;
+        /** When engaged, orbit the target (classic). When false, maintain optimal distance via FOLLOW (smooth straight-line kinematics vs ring motion). Default false — try standoff first. */
+        bool EngagedUseOrbit;
     } npc;
 
     // From <database>
@@ -249,6 +253,8 @@ public:
         uint16 port;
         /// Port at which the imageServer should listen.
         uint16 imageServerPort;
+        /// IPv4 address to bind game + image TCP listeners (empty = all interfaces, INADDR_ANY).
+        std::string listenAddress;
         /// the imageServer for char images. should be the evemu server external ip/host
         std::string imageServer;
     } net;
@@ -285,6 +291,12 @@ public:
         int8 Radar;
         int8 Unrated;
         int8 Complex;
+        /** 0..1 chance to spawn an escalation cosmic signature after clearing an anomaly or unrated combat site */
+        float EscalationChance;
+        /** Number of regular combat waves for cosmic anomalies (1–5). */
+        uint8 AnomalyCombatWaves;
+        /** 0..1 chance for an extra commander wave after regular waves (Entity commander groups). */
+        float AnomalyCommanderChance;
     } exploring;
 
     // From <standings>
@@ -347,6 +359,22 @@ public:
         uint32 AnomalyFaction;
     } debug;
 
+    // From <discord> — optional HTTPS webhooks (requires libcurl at build time)
+    struct {
+        bool enabled;
+        std::string webhookRareLootURL;
+        std::string webhookExpensiveDeathURL;
+        /** Optional: one post when the process enters the main loop after reboot (secrets — do not log). */
+        std::string webhookServerUpURL;
+        /** Rare-loot webhook: notify when any dropped type has invTypes.metaLevel > this (default 5 → meta 6+). */
+        uint16 rareLootMetaGt;
+        double minExpensiveDeathEstimatedISK;
+        uint32 cooldownRareLootSeconds;
+        uint32 cooldownExpensiveDeathSeconds;
+        /** When true, rare-loot webhooks only fire when the killing blow was from a player character (not NPC/sentry). */
+        bool lootOnlyPlayerShipKills;
+    } discord;
+
 protected:
     bool ProcessEveServer( const TiXmlElement* ele );
     bool ProcessServer( const TiXmlElement* ele );
@@ -368,6 +396,7 @@ protected:
     bool ProcessBPTimes( const TiXmlElement* ele );
     bool ProcessTesting( const TiXmlElement* ele );
     bool ProcessDebug( const TiXmlElement* ele );
+    bool ProcessDiscord( const TiXmlElement* ele );
 };
 
 /// A macro for easier access to the singleton.

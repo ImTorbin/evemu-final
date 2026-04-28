@@ -13,9 +13,12 @@
 
 
 #include "../eve-common/EVE_Character.h"
+#include "../eve-common/EVE_Corp.h"
 #include "../eve-common/EVE_POS.h"
+#include "../eve-common/tables/invGroups.h"
 
 #include "StaticDataMgr.h"
+#include "inventory/AttributeEnum.h"
 #include "EVEServerConfig.h"
 #include "database/EVEDBUtils.h"
 #include "manufacturing/FactoryDB.h"
@@ -23,6 +26,7 @@
 #include "station/StationDB.h"
 #include "system/SystemManager.h"
 #include "system/cosmicMgrs/ManagerDB.h"
+#include <algorithm>
 #include <random> // ---marketbot changes
 
 /*
@@ -692,11 +696,36 @@ const char* StaticDataMgr::GetGroupName(uint16 grpID)
     return "None";
 }
 
-void StaticDataMgr::GetType(uint16 typeID, Inv::TypeData& into)
+void StaticDataMgr::GetType(uint16 typeID, Inv::TypeData& into) const
 {
     std::map<uint16, Inv::TypeData>::const_iterator itr = m_typeData.find(typeID);
     if (itr != m_typeData.end())
         into = itr->second;
+}
+
+bool StaticDataMgr::HasType(uint16 typeID) const
+{
+    return m_typeData.find(typeID) != m_typeData.end();
+}
+
+bool StaticDataMgr::HasGroup(uint16 grpID) const
+{
+    return m_grpData.find(grpID) != m_grpData.end();
+}
+
+uint16 StaticDataMgr::GetRandomPublishedTypeInGroup(uint16 groupID) const
+{
+    if (!groupID)
+        return 0;
+    std::vector<uint16> candidates;
+    candidates.reserve(64);
+    for (const auto& cur : m_typeData) {
+        if (cur.second.groupID == groupID && cur.second.published)
+            candidates.push_back(cur.first);
+    }
+    if (candidates.empty())
+        return 0;
+    return candidates.at(rand() % candidates.size());
 }
 
 const char* StaticDataMgr::GetTypeName(uint16 typeID)
@@ -756,6 +785,30 @@ void StaticDataMgr::GetDgmTypeAttrVec(uint16 typeID, std::vector< DmgTypeAttribu
     auto itr = m_typeAttrMap.equal_range(typeID);
     for (auto it = itr.first; it != itr.second; ++it)
         typeAttrVec.push_back(it->second);
+}
+
+uint8 StaticDataMgr::ResolveTypeMetaLevel(uint16 typeID) const
+{
+    Inv::TypeData td;
+    GetType(typeID, td);
+    return ResolveTypeMetaLevel(typeID, td);
+}
+
+uint8 StaticDataMgr::ResolveTypeMetaLevel(uint16 typeID, const Inv::TypeData& typeRowForSameID) const
+{
+    uint16 merged = static_cast<uint16>(typeRowForSameID.metaLvl);
+    const auto range = m_typeAttrMap.equal_range(typeID);
+    for (auto it = range.first; it != range.second; ++it) {
+        if (it->second.attributeID != AttrMetaLevel)
+            continue;
+        int64 raw = const_cast<EvilNumber&>(it->second.value).get_int();
+        if (raw < 0)
+            raw = 0;
+        if (raw > 255)
+            raw = 255;
+        merged = std::max<uint16>(merged, static_cast<uint16>(raw));
+    }
+    return static_cast<uint8>(merged);
 }
 
 bool StaticDataMgr::IsSkillTypeID(uint16 typeID)
@@ -926,7 +979,50 @@ uint32 StaticDataMgr::GetWreckID(uint32 typeID)
     std::map<uint32, uint32>::const_iterator itr = m_WrecksToTypesMap.find(typeID);
     if (itr != m_WrecksToTypesMap.end())
         return itr->second;
-    return 0;
+
+    // SDE map incomplete on many emulators — pick a valid wreck hull by ship group (IsWreckTypeID range).
+    constexpr uint32 kSmall = 26557u;   // generic small hull wreck (Sentry/NPC fallback)
+    constexpr uint32 kMedium = 26565u;
+    constexpr uint32 kLarge = 26573u;
+
+    if (typeID == 0 || typeID > 0xFFFFu) {
+        _log(DATA__WARNING, "GetWreckID: invalid typeID %u — using small wreck %u.", typeID, kSmall);
+        return kSmall;
+    }
+
+    const uint16 tid = static_cast<uint16>(typeID);
+    if (!HasType(tid)) {
+        _log(DATA__WARNING, "GetWreckID: unknown typeID %u — using small wreck %u.", typeID, kSmall);
+        return kSmall;
+    }
+
+    Inv::TypeData td;
+    GetType(tid, td);
+    const uint16 g = td.groupID;
+
+    if (g == EVEDB::invGroups::Battleship
+        || g == EVEDB::invGroups::Dreadnought
+        || g == EVEDB::invGroups::Carrier
+        || g == EVEDB::invGroups::Titan
+        || g == EVEDB::invGroups::Supercarrier
+        || g == EVEDB::invGroups::Freighter
+        || g == EVEDB::invGroups::JumpFreighter) {
+        _log(DATA__MESSAGE, "GetWreckID: no map for type %u (group %u) — large wreck %u.", typeID, g, kLarge);
+        return kLarge;
+    }
+
+    if (g == EVEDB::invGroups::Cruiser
+        || g == EVEDB::invGroups::Battlecruiser
+        || g == EVEDB::invGroups::Industrial
+        || g == EVEDB::invGroups::Exhumer
+        || g == EVEDB::invGroups::MiningBarge) {
+        _log(DATA__MESSAGE, "GetWreckID: no map for type %u (group %u) — medium wreck %u.", typeID, g, kMedium);
+        return kMedium;
+    }
+
+    // Frigate, destroyer, shuttle, capsule, drones-as-ship, and all asteroid/deadspace NPC groups.
+    _log(DATA__MESSAGE, "GetWreckID: no map for type %u (group %u) — small wreck %u.", typeID, g, kSmall);
+    return kSmall;
 }
 
 void StaticDataMgr::GetLoot(uint32 groupID, std::vector<LootList>& lootList) {
@@ -984,6 +1080,160 @@ void StaticDataMgr::GetLoot(uint32 groupID, std::vector<LootList>& lootList) {
 
     if (sConfig.debug.UseProfiling)
         sProfiler.AddTime(Profile::loot, GetTimeUSeconds() - profileStartTime);
+}
+
+namespace {
+    uint16 PickPublishedType(const StaticDataMgr& mgr, const uint16* ids, size_t n)
+    {
+        uint16 candidates[96];
+        size_t cn = 0;
+        for (size_t i = 0; i < n && cn < sizeof(candidates) / sizeof(candidates[0]); ++i)
+            if (mgr.HasType(ids[i]))
+                candidates[cn++] = ids[i];
+        if (cn == 0)
+            return 0;
+        return candidates[static_cast<size_t>(MakeRandomInt(0, static_cast<int>(cn) - 1))];
+    }
+
+    void AppendLoot(StaticDataMgr const& mgr, uint16 typeID, std::vector<LootList>& out)
+    {
+        if (typeID && mgr.HasType(typeID))
+            out.push_back(LootList{1, 1, typeID});
+    }
+}
+
+void StaticDataMgr::BuildAnomalyCommanderBonusLoot(uint32 factionID, std::vector<LootList>& out) const
+{
+    out.clear();
+    if (factionID == 0)
+        factionID = factionRogueDrones;
+
+    static const uint16 angelMods[] = { 14122, 14118, 14244, 14254, 13778, 14100, 14264, 13773, 14106, 14110 };
+    static const uint16 angelBpc[] = { 17933, 17721, 17739 };
+
+    static const uint16 guristasMods[] = { 13937, 18668, 19194, 2050, 4346, 18682, 14250, 14260, 18676 };
+    static const uint16 guristasBpc[] = { 17931, 17716, 17919 };
+
+    static const uint16 bloodMods[] = { 18885, 18901, 18933, 18700, 18704, 18728, 18716 };
+    static const uint16 bloodBpc[] = { 17921, 17923, 17927 };
+
+    static const uint16 serpentisMods[] = { 14067, 14068, 14124, 14270, 18809, 18688, 14250 };
+    static const uint16 serpentisBpc[] = { 17719, 17723, 17741 };
+
+    static const uint16 sanshaMods[] = { 13943, 13828, 13829, 13963, 13956, 13970, 14264 };
+    static const uint16 sanshaBpc[] = { 17925, 17737, 17719 };
+
+    static const uint16 rogueMods[] = { 33848, 33852, 19194, 18668 };
+    static const uint16 rogueBpc[] = { 41418, 17919 };
+
+    static const uint16 mordusMods[] = { 14690, 14703, 14395, 14405, 5925, 18688 };
+    static const uint16 mordusBpc[] = { 33817, 33819, 33821 };
+
+    const uint16* modArr = angelMods;
+    const uint16* bpcArr = angelBpc;
+    size_t modCount = sizeof(angelMods) / sizeof(angelMods[0]);
+    size_t bpcCount = sizeof(angelBpc) / sizeof(angelBpc[0]);
+
+    switch (factionID) {
+        case factionGuristas:
+            modArr = guristasMods;
+            bpcArr = guristasBpc;
+            modCount = sizeof(guristasMods) / sizeof(guristasMods[0]);
+            bpcCount = sizeof(guristasBpc) / sizeof(guristasBpc[0]);
+            break;
+        case factionBloodRaider:
+            modArr = bloodMods;
+            bpcArr = bloodBpc;
+            modCount = sizeof(bloodMods) / sizeof(bloodMods[0]);
+            bpcCount = sizeof(bloodBpc) / sizeof(bloodBpc[0]);
+            break;
+        case factionSerpentis:
+            modArr = serpentisMods;
+            bpcArr = serpentisBpc;
+            modCount = sizeof(serpentisMods) / sizeof(serpentisMods[0]);
+            bpcCount = sizeof(serpentisBpc) / sizeof(serpentisBpc[0]);
+            break;
+        case factionSanshas:
+            modArr = sanshaMods;
+            bpcArr = sanshaBpc;
+            modCount = sizeof(sanshaMods) / sizeof(sanshaMods[0]);
+            bpcCount = sizeof(sanshaBpc) / sizeof(sanshaBpc[0]);
+            break;
+        case factionRogueDrones:
+            modArr = rogueMods;
+            bpcArr = rogueBpc;
+            modCount = sizeof(rogueMods) / sizeof(rogueMods[0]);
+            bpcCount = sizeof(rogueBpc) / sizeof(rogueBpc[0]);
+            break;
+        case factionMordusLegion:
+            modArr = mordusMods;
+            bpcArr = mordusBpc;
+            modCount = sizeof(mordusMods) / sizeof(mordusMods[0]);
+            bpcCount = sizeof(mordusBpc) / sizeof(mordusBpc[0]);
+            break;
+        case factionAngel:
+        default:
+            break;
+    }
+
+    if (MakeRandomFloat(0.f, 1.f) < 0.88f) {
+        uint16 t = PickPublishedType(*this, modArr, modCount);
+        AppendLoot(*this, t, out);
+        if (MakeRandomFloat(0.f, 1.f) < 0.28f) {
+            uint16 t2 = PickPublishedType(*this, modArr, modCount);
+            if (t2 && t2 != t)
+                AppendLoot(*this, t2, out);
+        }
+    }
+    if (MakeRandomFloat(0.f, 1.f) < 0.38f) {
+        uint16 b = PickPublishedType(*this, bpcArr, bpcCount);
+        AppendLoot(*this, b, out);
+    }
+}
+
+bool StaticDataMgr::GetFactionCommanderBonusLootFaction(uint16 typeID, uint32& factionID) const
+{
+    factionID = 0;
+    if (!HasType(typeID))
+        return false;
+    Inv::TypeData td;
+    GetType(typeID, td);
+    const std::string& n = td.name;
+
+    auto prefix = [&n](const char* p, size_t len) -> bool {
+        return n.size() >= len && n.compare(0, len, p, len) == 0;
+    };
+
+    /* Match longer ship-name prefixes first (Entity / asteroid commanders). */
+    if (prefix("Gistii Domination ", 18) || prefix("Gist Domination ", 16)) {
+        factionID = factionAngel;
+        return true;
+    }
+    if (prefix("Dark Blood ", 11)) {
+        factionID = factionBloodRaider;
+        return true;
+    }
+    if (prefix("Dread Guristas ", 15)) {
+        factionID = factionGuristas;
+        return true;
+    }
+    if (prefix("Shadow Serpentis ", 17)) {
+        factionID = factionSerpentis;
+        return true;
+    }
+    if (prefix("True Sansha ", 12)) {
+        factionID = factionSanshas;
+        return true;
+    }
+    if (prefix("Sentient ", 9)) {
+        factionID = factionRogueDrones;
+        return true;
+    }
+    if (prefix("Domination ", 11)) {
+        factionID = factionAngel;
+        return true;
+    }
+    return false;
 }
 
 void StaticDataMgr::GetBpTypeData(uint16 typeID, EvERam::bpTypeData& tData)
@@ -1756,6 +2006,63 @@ uint32 StaticDataMgr::GetRaceFaction(uint8 raceID)
     return factionNoFaction;
 }
 
+uint32 StaticDataMgr::InferNpcRatFactionForShipType(uint16 typeID) const
+{
+    uint32 cmdFaction = 0;
+    if (GetFactionCommanderBonusLootFaction(typeID, cmdFaction))
+        return cmdFaction;
+
+    if (!HasType(typeID))
+        return InferNpcRatFactionNoMatch;
+
+    Inv::TypeData td;
+    GetType(typeID, td);
+    const std::string& n = td.name;
+
+    auto contains = [&n](const char* s) -> bool {
+        return n.find(s) != std::string::npos;
+    };
+
+    using namespace EVEDB::invGroups;
+    const uint16 gid = td.groupID;
+    if (gid == Rogue_Drone
+        || (gid >= Asteroid_Rogue_Drone_Battlecruiser && gid <= Asteroid_Rogue_Drone_Swarm)
+        || (gid >= Deadspace_Rogue_Drone_Battlecruiser && gid <= Deadspace_Rogue_Drone_Swarm)
+        || (gid >= Asteroid_Rogue_Drone_Commander_Battlecruiser && gid <= Asteroid_Rogue_Drone_Commander_Frigate))
+        return factionRogueDrones;
+
+    if (contains("Sleeper"))
+        return factionSleepers;
+    if (contains("Sansha"))
+        return factionSanshas;
+    if (contains("Guristas"))
+        return factionGuristas;
+    if (contains("Serpentis"))
+        return factionSerpentis;
+    if (contains("Blood Raider"))
+        return factionBloodRaider;
+    if (contains("Gist") || contains("Domination") || n.compare(0, 5, "Arch ", 5) == 0)
+        return factionAngel;
+    if (contains("Mordu"))
+        return factionMordusLegion;
+    if (contains("Thukker"))
+        return factionThukker;
+    if (contains("Syndicate"))
+        return factionSyndicate;
+    if (contains("Sisters") && contains("EVE"))
+        return factionSistersOfEVE;
+    if (contains("Amarr Navy") || contains("Khanid Navy") || contains("Ammatar"))
+        return factionAmarr;
+    if (contains("Caldari Navy"))
+        return factionCaldari;
+    if (contains("Republic Fleet"))
+        return factionMinmatar;
+    if (contains("Federation Navy") || contains("Gallente Federation"))
+        return factionGallente;
+
+    return InferNpcRatFactionNoMatch;
+}
+
 uint8 StaticDataMgr::GetFactionRace(uint32 factionID)
 {
     switch (factionID) {
@@ -2238,4 +2545,26 @@ void StaticDataMgr::GetRandomSystemIDs(size_t count, std::vector<uint32>& outSys
     if (outSystems.size() > count) {
         outSystems.resize(count);
     }
+}
+
+void StaticDataMgr::GetRandomSystemIDsWithStations(size_t count, std::vector<uint32>& outSystems) const {
+    outSystems.clear();
+    if (count == 0)
+        return;
+    std::vector<uint32> pool;
+    pool.reserve(m_systemData.size());
+    for (const auto& [systemID, data] : m_systemData) {
+        (void)data;
+        std::vector<uint32> stations;
+        if (GetStationListForSystem(systemID, stations) && !stations.empty())
+            pool.push_back(systemID);
+    }
+    if (pool.empty())
+        return;
+    std::random_device rd;
+    std::mt19937 g(rd());
+    std::shuffle(pool.begin(), pool.end(), g);
+    if (pool.size() > count)
+        pool.resize(count);
+    outSystems = std::move(pool);
 }
