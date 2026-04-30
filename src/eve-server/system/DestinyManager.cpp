@@ -145,6 +145,7 @@ mvPacket(nullptr)
     m_stateStamp = 0;
     m_lastPosBroadcast = 0;
     m_lastPosBroadcastMS = 0;
+    m_lastObserverBroadcastStamp = 0;
     m_lastNpcMoveIntegrateMS = 0;
     m_lastNpcGotoFollowBroadcastMS = 0;
     m_lastSelfSyncMS = 0;
@@ -1149,11 +1150,24 @@ void DestinyManager::MoveObject() {
     //  server orbited; wrecks then appeared at true server positions.
     bool syncObservers = sConfig.debug.PositionHack || !mySE->HasPilot();
     if (!syncObservers) {
-        const uint32 nowMS = static_cast<uint32>(GetTimeMSeconds());
-        if ((nowMS - m_lastPosBroadcastMS) >= 33) {
-            syncObservers = true;
-            m_lastPosBroadcastMS = nowMS;
-            m_lastPosBroadcast = sEntityList.GetStamp();
+        const uint32 stampNow = sEntityList.GetStamp();
+        if (sConfig.server.tranquilityStyleObserverNet) {
+            if (stampNow > m_lastObserverBroadcastStamp)
+                syncObservers = true;
+        } else {
+            uint16 minMs = sConfig.server.destinyObserverBroadcastMinMs;
+            if (minMs == 0)
+                minMs = 33;
+            if (minMs < 10)
+                minMs = 10;
+            else if (minMs > 500)
+                minMs = 500;
+            const uint32 nowMS = static_cast<uint32>(GetTimeMSeconds());
+            if ((nowMS - m_lastPosBroadcastMS) >= minMs) {
+                syncObservers = true;
+                m_lastPosBroadcastMS = nowMS;
+                m_lastPosBroadcast = stampNow;
+            }
         }
     }
     // Ring orbit: Orbit() already placed m_position on the circle. Adding m_velocity here
@@ -1161,9 +1175,6 @@ void DestinyManager::MoveObject() {
     // TooClose/TooFar and still integrate with +m_velocity.
     //
     // Non-pilot motion runs at EntityList dynamic destiny (see DynamicDestinyMs, default ~17 ms ~60/s).
-    // Sub-interval observer throttles on piloted ships skipped net sync on some ticks ...
-    // Broadcast every high-freq step when syncObservers is already true; piloted ships still use
-    // the 33ms gate above.
     const bool orbitNetSync = syncObservers;
 
     if (m_ballMode == Destiny::Ball::Mode::ORBIT && m_orbitPhase == DestinyOrbitPhase::OnRing) {
@@ -1172,6 +1183,10 @@ void DestinyManager::MoveObject() {
         const bool subwarpNetSync = syncObservers;
         SetPosition(m_position + (m_velocity * posDt), subwarpNetSync);
     }
+
+    if (syncObservers && mySE->HasPilot() && !sConfig.debug.PositionHack
+        && sConfig.server.tranquilityStyleObserverNet)
+        m_lastObserverBroadcastStamp = sEntityList.GetStamp();
 
     if (is_log_enabled(DESTINY__MOVE_DEBUG))
         _log(DESTINY__MOVE_DEBUG, "Destiny::MoveObject() - %s(%u) Pos:%.2f,%.2f,%.2f  Vel:%.3f,%.3f,%.3f  Head:%.3f,%.3f,%.3f", \

@@ -82,6 +82,8 @@ void ImageServerListener::StartAccept()
 
 void ImageServerListener::HandleAccept(std::shared_ptr<ImageServerConnection> connection)
 {
+    boost::system::error_code ec;
+    connection->socket().set_option(boost::asio::ip::tcp::no_delay(true), ec);
     connection->Process();
     StartAccept();
 }

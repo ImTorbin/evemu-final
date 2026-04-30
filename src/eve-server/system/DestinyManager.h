@@ -323,6 +323,8 @@ protected:
     uint32 m_stateStamp;                //statestamp of when current state began, in seconds
     uint32 m_lastPosBroadcast;          //legacy 1Hz stamp counter retained for compatibility/logging
     uint32 m_lastPosBroadcastMS;        //monotonic ms timestamp of last observer SetBallPosition for piloted ships
+    /** When tranquilityStyleObserverNet: last GetStamp() we sent observer snapshot (max once per stamp). */
+    uint32 m_lastObserverBroadcastStamp;
     /** Wall-clock delta for integrating m_velocity (m/s) in MoveObject (pilots + NPCs at DynamicDestinyMs). */
     uint32 m_lastNpcMoveIntegrateMS;
     /** Same idea for GOTO/FOLLOW: ~10Hz integration + every-tick SetBall* fights client subwarp prediction → jerk. */

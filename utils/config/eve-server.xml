@@ -42,8 +42,12 @@ boolean can use either 0/1 OR true/false.
         <ServerSleepTime>10</ServerSleepTime><!-- ms; lower (e.g. 5) slightly increases responsiveness over VPN/high RTT at CPU cost -->
         <maxPlayers>250</maxPlayers>
         <idleSleepTime>1000</idleSleepTime><!-- in ms (1 sec default) -->
-        <!-- Non-pilot ship motion (rats, drones orbiting/FOLLOW/GOTO): tick interval ms. Lower = smoother (~17≈58/s, legacy 50≈20/s). Clamp 10–100. -->
+        <!-- Non-pilot subwarp/orbit/FOLLOW: tick interval ms (10–100). ~17 ≈ 58 Hz. -->
         <DynamicDestinyMs>17</DynamicDestinyMs>
+        <!-- Pilot ship observer position snapshots: min ms between broadcasts (10–500; 0 = default 33). Lower = smoother for remote viewers, more bandwidth. Ignored if tranquilityStyleObserverNet is true. -->
+        <destinyObserverBroadcastMinMs>5</destinyObserverBroadcastMinMs>
+        <!-- Tranquility-like: observers see pilot motion at most once per server stamp (~1 Hz); subwarp still simulates at DynamicDestinyMs. Steppier visuals, less net traffic. -->
+        <tranquilityStyleObserverNet>false</tranquilityStyleObserverNet>
         <processTic>1.0</processTic><!-- used to slow down server process tics.  <1.0 is faster, >1.0 slower -->
         <MaxThreadReport>10</MaxThreadReport>
         <DisableIGB>false</DisableIGB>

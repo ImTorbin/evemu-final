@@ -51,6 +51,8 @@ EVEServerConfig::EVEServerConfig()
     server.ServerSleepTime = 10 /*ms*/;
     server.idleSleepTime = 1000;
     server.DynamicDestinyMs = 17; // ~60 Hz (1000/60≈16.7ms; int ms); smoother NPC/drone motion for observers
+    server.destinyObserverBroadcastMinMs = 33; // ~30 Hz observer updates for piloted ships (not 1 Hz stamp)
+    server.tranquilityStyleObserverNet = false;
     server.DisableIGB = true;
     server.MaxThreadReport = 20;
     server.ModuleAutoOff = false;
@@ -355,6 +357,8 @@ bool EVEServerConfig::ProcessServer( const TiXmlElement* ele )
     AddValueParser( "ServerSleepTime",      server.ServerSleepTime );
     AddValueParser( "idleSleepTime",        server.idleSleepTime );
     AddValueParser( "DynamicDestinyMs",      server.DynamicDestinyMs );
+    AddValueParser( "destinyObserverBroadcastMinMs", server.destinyObserverBroadcastMinMs );
+    AddValueParser( "tranquilityStyleObserverNet", server.tranquilityStyleObserverNet );
     AddValueParser( "MaxThreadReport",      server.MaxThreadReport );
     AddValueParser( "ModuleAutoOff",        server.ModuleAutoOff );
     AddValueParser( "ModuleDamageChance",   server.ModuleDamageChance );
@@ -378,6 +382,8 @@ bool EVEServerConfig::ProcessServer( const TiXmlElement* ele )
     RemoveParser( "ServerSleepTime" );
     RemoveParser( "idleSleepTime" );
     RemoveParser( "DynamicDestinyMs" );
+    RemoveParser( "destinyObserverBroadcastMinMs" );
+    RemoveParser( "tranquilityStyleObserverNet" );
     RemoveParser( "MaxThreadReport" );
     RemoveParser( "ModuleAutoOff" );
     RemoveParser( "ModuleDamageChance" );

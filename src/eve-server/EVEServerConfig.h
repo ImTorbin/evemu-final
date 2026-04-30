@@ -65,6 +65,10 @@ public:
         uint16 idleSleepTime;
         /// Interval (ms) for ProcessDynamicDestiny (~non-pilot subwarp/orbit/FOLLOW). Higher rate = smoother observers; costs CPU/network.
         uint16 DynamicDestinyMs;
+        /** Min interval (ms) between observer destiny position snapshots for piloted ships. Lower = smoother for WAN peers, more bandwidth. Clamped 10–500 at use site; 0 resets to default 33. */
+        uint16 destinyObserverBroadcastMinMs;
+        /** When true, pilot observer SetBallPosition fanout is limited to once per server stamp (~1 Hz) while subwarp still integrates at DynamicDestinyMs. Tranquility-like net cadence; observers may look steppier. */
+        bool tranquilityStyleObserverNet;
         uint16 maxPlayers;
         float processTic;
         float ModuleDamageChance;
