@@ -39,7 +39,7 @@ boolean can use either 0/1 OR true/false.
 
     <server>
         <NoobShipCheck>true</NoobShipCheck><!-- bool  -check for ship in hangar when docking in a pod -->
-        <ServerSleepTime>10</ServerSleepTime><!-- ms -->
+        <ServerSleepTime>10</ServerSleepTime><!-- ms; lower (e.g. 5) slightly increases responsiveness over VPN/high RTT at CPU cost -->
         <maxPlayers>250</maxPlayers>
         <idleSleepTime>1000</idleSleepTime><!-- in ms (1 sec default) -->
         <!-- Non-pilot ship motion (rats, drones orbiting/FOLLOW/GOTO): tick interval ms. Lower = smoother (~17≈58/s, legacy 50≈20/s). Clamp 10–100. -->

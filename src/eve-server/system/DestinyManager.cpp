@@ -1138,7 +1138,8 @@ void DestinyManager::MoveObject() {
     //    rubber-banding). SetPosition() already routes piloted broadcasts via
     //    BubblecastDestinyUpdateExclusive so the pilot is skipped -- but we still throttle the
     //    observer broadcast. Throttle uses monotonic milliseconds now, not EntityList's 1Hz
-    //    stamp, so nearby ships do not look frozen for long gaps.
+    //    stamp, so nearby ships do not look frozen for long gaps. ~30+ Hz reduces stair-stepping
+    //    for WAN observers (50ms was ~20Hz, chunky on top of RTT jitter).
     //  - Non-piloted moving entities (NPCs, drones, missiles, probes/POS) retain the legacy
     //    per-tick broadcast via their normal handling in SetPosition().
     //
@@ -1149,7 +1150,7 @@ void DestinyManager::MoveObject() {
     bool syncObservers = sConfig.debug.PositionHack || !mySE->HasPilot();
     if (!syncObservers) {
         const uint32 nowMS = static_cast<uint32>(GetTimeMSeconds());
-        if ((nowMS - m_lastPosBroadcastMS) >= 50) {
+        if ((nowMS - m_lastPosBroadcastMS) >= 33) {
             syncObservers = true;
             m_lastPosBroadcastMS = nowMS;
             m_lastPosBroadcast = sEntityList.GetStamp();
@@ -1162,7 +1163,7 @@ void DestinyManager::MoveObject() {
     // Non-pilot motion runs at EntityList dynamic destiny (see DynamicDestinyMs, default ~17 ms ~60/s).
     // Sub-interval observer throttles on piloted ships skipped net sync on some ticks ...
     // Broadcast every high-freq step when syncObservers is already true; piloted ships still use
-    // the 50ms gate above.
+    // the 33ms gate above.
     const bool orbitNetSync = syncObservers;
 
     if (m_ballMode == Destiny::Ball::Mode::ORBIT && m_orbitPhase == DestinyOrbitPhase::OnRing) {

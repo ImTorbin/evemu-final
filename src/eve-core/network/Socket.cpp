@@ -27,6 +27,13 @@
 
 #include "network/Socket.h"
 
+#ifndef HAVE_WINSOCK2_H
+#   include <netinet/in.h>
+#   include <netinet/tcp.h>
+#else
+#   include <winsock2.h>
+#endif
+
 Socket::Socket( int af, int type, int protocol )
 : mSock( INVALID_SOCKET )
 {
@@ -117,4 +124,13 @@ int Socket::setblocking( bool blocking )
     flags = blocking ? ( flags & ~O_NONBLOCK ) : ( flags | O_NONBLOCK );
     return ::fcntl( mSock, F_SETFL, flags );
 #endif
+}
+
+void Socket::set_tcp_nodelay( bool enable )
+{
+    /* TCP_NODELAY: send segments immediately instead of coalescing ~MSL-sized packets.
+     * Without this, many small destiny/service frames batch and arrive in bursts over
+     * high-latency links — ships and NPCs look to stutter even when server sim is smooth. */
+    int v = enable ? 1 : 0;
+    (void)setopt( IPPROTO_TCP, TCP_NODELAY, &v, sizeof( v ) );
 }

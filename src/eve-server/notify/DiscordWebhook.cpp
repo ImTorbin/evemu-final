@@ -137,7 +137,12 @@ std::string JsonEscape(const std::string& in)
 
 constexpr int COLOR_LOOT = 0x2ecc71;
 constexpr int COLOR_DEATH = 0xe74c3c;
-constexpr int COLOR_UP = 0x3498db;
+/** Deep space blue — closer to EVE UI than flat bootstrap blue. */
+constexpr int COLOR_UP = 0x1c2833;
+
+/** Static type renders via images.evetech.net (EVE static data artwork; not affiliated with CCP). */
+constexpr const char* const SERVER_UP_THUMB_URL = "https://images.evetech.net/types/1230/render?size=128";
+constexpr const char* const SERVER_UP_IMAGE_URL = "https://images.evetech.net/types/11021/render?size=512";
 
 void QueuePost(const std::string& url, const std::string& jsonBody)
 {
@@ -336,11 +341,12 @@ void DiscordWebhook_NotifyExpensiveDeath(
 #endif
 }
 
-void DiscordWebhook_NotifyServerUp(const std::string& startedUtc, const std::string& revision)
+void DiscordWebhook_NotifyServerUp(const std::string& startedLocalTime, uint32 playersOnline, uint32 maxPlayersCap)
 {
 #ifndef HAVE_LIBCURL
-    (void)startedUtc;
-    (void)revision;
+    (void)startedLocalTime;
+    (void)playersOnline;
+    (void)maxPlayersCap;
 #else
     /* Server-up is infra signal: do not gate on discord.enabled (operators often disable loot/death
      * spam but still want restart notifications). Rare loot/death hooks still honor enabled + URLs. */
@@ -352,14 +358,19 @@ void DiscordWebhook_NotifyServerUp(const std::string& startedUtc, const std::str
     }
 
     std::ostringstream descUp;
-    descUp << "**Status:** accepting connections\n";
-    descUp << "**Started:** " << startedUtc;
-    if (!revision.empty())
-        descUp << "\n**Revision:** " << revision;
+    descUp << "The cluster is **accepting connections**. Jump in when you are ready.\n\n";
+    descUp << "**Capsuleers online:** " << playersOnline;
+    descUp << "\n**Capacity:** up to " << maxPlayersCap << " pilots";
+    descUp << "\n**Local time (server host):** " << startedLocalTime;
 
     std::ostringstream jsonUp;
-    jsonUp << "{\"embeds\":[{\"title\":\"EVEmu server online\",";
-    jsonUp << "\"description\":\"" << JsonEscape(descUp.str()) << "\",\"color\":" << COLOR_UP << "}]}";
+    jsonUp << "{\"embeds\":[{\"title\":\"" << JsonEscape("Capsuleers welcome — New Eden is open") << "\",";
+    jsonUp << "\"description\":\"" << JsonEscape(descUp.str()) << "\",";
+    jsonUp << "\"color\":" << COLOR_UP << ",";
+    jsonUp << "\"thumbnail\":{\"url\":\"" << JsonEscape(SERVER_UP_THUMB_URL) << "\"},";
+    jsonUp << "\"image\":{\"url\":\"" << JsonEscape(SERVER_UP_IMAGE_URL) << "\"},";
+    jsonUp << "\"footer\":{\"text\":\"" << JsonEscape("EVEmu | Ship renders: evetech.net") << "\"}";
+    jsonUp << "}]}";
 
     const std::string body = jsonUp.str();
 

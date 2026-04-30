@@ -43,6 +43,6 @@ void DiscordWebhook_NotifyExpensiveDeath(
     uint32 killerCharID);
 
 /** Fires once when the game server thread is about to enter the main loop (post-reboot). */
-void DiscordWebhook_NotifyServerUp(const std::string& startedUtc, const std::string& revision);
+void DiscordWebhook_NotifyServerUp(const std::string& startedLocalTime, uint32 playersOnline, uint32 maxPlayersCap);
 
 #endif /* !__DISCORD_WEBHOOK_H_INCL__ */

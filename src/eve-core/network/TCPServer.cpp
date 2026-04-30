@@ -181,6 +181,7 @@ void BaseTCPServer::ListenNewConnections()
         mSock->setblocking( false );
         unsigned int bufsize = 64 * 1024; // 64kbyte receive buffer, up from default of 8k
         sock->setopt( SOL_SOCKET, SO_RCVBUF, &bufsize, sizeof( bufsize ) );
+        sock->set_tcp_nodelay( true );
         // New TCP connection, this must consume the socket.
         CreateNewConnection( sock, from.sin_addr.s_addr, ntohs( from.sin_port ) );
     }

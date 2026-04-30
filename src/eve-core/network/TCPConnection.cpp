@@ -122,6 +122,7 @@ bool TCPConnection::Connect(uint32 rIP, uint16 rPort, char* errbuf)
     mSock->setopt(SOL_SOCKET, SO_RCVBUF, (char*) &bufsize, sizeof(bufsize));
     //mSock->fcntl(F_SETFL, O_NONBLOCK);
     mSock->setblocking(false);
+    mSock->set_tcp_nodelay( true );
     mrIP = rIP;
     mrPort = rPort;
     mSockState = STATE_CONNECTED;

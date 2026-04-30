@@ -52,6 +52,9 @@ public:
     int setopt( int level, int optname, const void* optval, unsigned int optlen );
     int setblocking( bool blocking );
 
+    /** Disable Nagle (TCP_NODELAY) — flushes small packets immediately; reduces movement stutter over WAN. */
+    void set_tcp_nodelay( bool enable );
+
 protected:
     Socket( SOCKET sock );
 

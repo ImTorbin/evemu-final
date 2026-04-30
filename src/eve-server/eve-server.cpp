@@ -924,7 +924,7 @@ int main( int argc, char* argv[] )
     ServiceDB::SetServerOnlineStatus(true);
     sLog.Green("       ServerInit", "EVEmu Server is Online.");
 
-    DiscordWebhook_NotifyServerUp(currentDateTime(), std::string(EVEMU_REVISION));
+    DiscordWebhook_NotifyServerUp(currentDateTime(), sEntityList.GetClientCount(), sConfig.server.maxPlayers);
 
     sLog.Cyan("           Server", "Started on %s", currentDateTime().c_str());
 
