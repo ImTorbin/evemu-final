@@ -25,7 +25,7 @@ services:
       - SEED_MARKET=${SEED_MARKET:-TRUE} # Set to TRUE to seed the market when the server starts for the first time
       - SEED_SATURATION=${SEED_SATURATION:-80} # Set saturation level of seed
       - SEED_REGIONS=${SEED_REGIONS:-Derelik,The Citadel,The Forge,Essence,Domain,Kor-Azor,Metropolis,Sinq Laison} # Define regions to be seeded
-      - RUN_WITH_GDB=${RUN_GDB:-TRUE} #Set to TRUE to run evemu with gdb automatically
+      - RUN_WITH_GDB=${RUN_GDB:-FALSE} # TRUE = run eve-server under gdb in the container (dev only)
     stdin_open: true # Enables stdin for the container. Attach to it with 'docker attach'
     tty: true
     # cap_add: #This is required for gdb to work

@@ -53,6 +53,23 @@
 #include "system/SystemManager.h"
 #include <cstdlib>
 
+#include "Profiler.h"
+
+namespace {
+/** When UseProfiling is on, records wall microseconds to Profile::destiny_move / destiny_orbit / destiny_send on scope exit. */
+struct ScopeDestinyProfile {
+    const bool on;
+    const double t0;
+    const uint8_t key;
+    explicit ScopeDestinyProfile(uint8_t k)
+    : on(sConfig.debug.UseProfiling), t0(on ? GetTimeUSeconds() : 0.0), key(k) {}
+    ~ScopeDestinyProfile() {
+        if (on)
+            sProfiler.AddTime(key, GetTimeUSeconds() - t0);
+    }
+};
+} // namespace
+
 
 DestinyManager::DestinyManager(SystemEntity *self)
 : mySE(self),
@@ -176,6 +193,12 @@ float DestinyManager::GetSpeedFraction()
 }
 
 // this is called once per tic by SystemEntity::Process()
+//
+// WARP / TICK REGRESSION CHECKLIST (before changing Process vs ProcessHighFreqState):
+// - Process() @ 1 Hz: pilot warp TUNNEL when Ball::WARP && m_warpState!=nullptr; missiles @1Hz; cloak proximity throttle.
+// - Process() does NOT integrate pilot subwarp — that is ProcessHighFreqState @ DynamicDestinyMs.
+// - ProcessHighFreqState: STOP/GOTO/ORBIT/FOLLOW + WARP *align* phase when m_warpState==nullptr. Skips MISSILE and in-tunnel WARP.
+// - Duplicating tunnel integration in high-freq or skipping align breaks warp; re-test player warp, NPC warp, missiles after edits.
 void DestinyManager::Process() {
     double profileStartTime(GetTimeUSeconds());
 
@@ -844,6 +867,7 @@ void DestinyManager::Bounce(GVector direction, float speed)
 
 // main movement method
 void DestinyManager::MoveObject() {
+    ScopeDestinyProfile _prof(Profile::destiny_move);
     if (mySE->SysBubble() == nullptr)
         mySE->SystemMgr()->AddEntity(mySE);
 
@@ -1193,6 +1217,7 @@ bool DestinyManager::IsTurn() {    //this is working.  dont change
         GVector toVec(m_position, m_targetPoint);
         toVec.normalize();
         m_shipHeading = toVec;
+        m_targetHeading = toVec;
         return false;
     }
 
@@ -1202,6 +1227,9 @@ bool DestinyManager::IsTurn() {    //this is working.  dont change
     /** @todo revisit this to verify angle calcs */
     GVector toVec(m_position, m_targetPoint);
     toVec.normalize();
+    /* Turn() interpolates toward m_targetHeading; keep it equal to the live aim vector so
+     * Follow()/GOTO (moving m_targetPoint) do not steer toward a stale BeginMovement heading. */
+    m_targetHeading = toVec;
     float dot(toVec.dotProduct(m_shipHeading));
     if ((dot > 1.0f) or (dot < -1.0f)) {
         sLog.Error("Destiny::IsTurn()", "%s(%u) - shipHeading has screwed up.  dot is %.5f", mySE->GetName(), mySE->GetID(), dot);
@@ -1224,6 +1252,7 @@ bool DestinyManager::IsTurn() {    //this is working.  dont change
     float degrees(EvE::Trig::Rad2Deg(m_radians));
     if (degrees < TURN_ALIGNMENT/*4*/) {
         m_shipHeading = toVec;
+        m_targetHeading = toVec;
         return false;
     }
     if (is_log_enabled(DESTINY__TURN_TRACE)) {
@@ -1353,6 +1382,7 @@ void DestinyManager::Turn() {   // tracking within 900m for Frigates, 1k4m for B
     }
     deltaHeading *= turnPercent;
     m_shipHeading += deltaHeading;
+    m_shipHeading.normalize();
     if (is_log_enabled(DESTINY__TURN_TRACE))
         _log(DESTINY__TURN_TRACE, "Destiny::Turn() - tf:%.3f, turnTic:%u, degRemain:%.3f  (deltaHeading:%.5f, %.5f, %.5f * turnPercent:%.2f) = shipHeading:%.3f, %.3f, %.3f", \
             m_timeFraction, m_turnTic, degrees, deltaHeading.x, deltaHeading.y, deltaHeading.z, turnPercent, m_shipHeading.x, m_shipHeading.y, m_shipHeading.z);
@@ -1472,6 +1502,7 @@ Prediction service for in-space flight
 """
 */
 void DestinyManager::Orbit() {
+    ScopeDestinyProfile _prof(Profile::destiny_orbit);
     if (m_targetEntity.second == nullptr) {
         _log(DESTINY__WARNING, "Destiny::Orbit() tic - %s(%u): no orbit target; stopping.", mySE->GetName(), mySE->GetID());
         Stop();
@@ -3910,6 +3941,8 @@ void DestinyManager::SendDestinyUpdate( std::vector<PyTuple*>& updates, std::vec
     if (!mySE->SystemMgr()->IsLoaded()) {
         return;
     }
+
+    ScopeDestinyProfile _prof(Profile::destiny_send);
 
     if (self_only) {
         if (!mySE->HasPilot()) {

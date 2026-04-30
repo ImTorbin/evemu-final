@@ -49,7 +49,10 @@ void Profiler::AddTime(uint8 key, double value) {
     Profile::damage      = 24,   *
     Profile::parseFX     = 25,   *
     Profile::applyFX     = 26,   *
-    Profile::onTarg      = 27
+    Profile::onTarg      = 27,   *
+    Profile::destiny_move = 28,  *
+    Profile::destiny_orbit = 29, *
+    Profile::destiny_send = 30   *
     */
     switch(key) {
         case 1:
@@ -133,6 +136,15 @@ void Profiler::AddTime(uint8 key, double value) {
         case 27:
             m_ontarget.push_back(value);
             break;
+        case 28:
+            m_destinyMove.push_back(value);
+            break;
+        case 29:
+            m_destinyOrbit.push_back(value);
+            break;
+        case 30:
+            m_destinySend.push_back(value);
+            break;
         default:
             sLog.Error("Profile::AddTime()", "Default reached on key %u.", key );
             break;
@@ -168,6 +180,9 @@ void Profiler::ClearAll()
     m_damage.clear();
     m_effects1.clear();
     m_effects2.clear();
+    m_destinyMove.clear();
+    m_destinyOrbit.clear();
+    m_destinySend.clear();
 }
 
 void Profiler::PrintProfile()
@@ -195,6 +210,15 @@ void Profiler::PrintProfile()
     GetRunTimes(m_destiny, h, l, a);
     GetSize(m_destiny.size(), fSize);
     std::printf("       Destiny   %s times.   \tHi: %.4fus   \tLo: %.4fus   \tAvg: %.4fus\n", fSize.c_str(), h, l, a );
+    GetRunTimes(m_destinyMove, h, l, a);
+    GetSize(m_destinyMove.size(), fSize);
+    std::printf("  DestinyMoveOb %s times.   \tHi: %.4fus   \tLo: %.4fus   \tAvg: %.4fus\n", fSize.c_str(), h, l, a );
+    GetRunTimes(m_destinyOrbit, h, l, a);
+    GetSize(m_destinyOrbit.size(), fSize);
+    std::printf(" DestinyOrbitTic %s times.   \tHi: %.4fus   \tLo: %.4fus   \tAvg: %.4fus\n", fSize.c_str(), h, l, a );
+    GetRunTimes(m_destinySend, h, l, a);
+    GetSize(m_destinySend.size(), fSize);
+    std::printf(" DestinySendUpd %s times.   \tHi: %.4fus   \tLo: %.4fus   \tAvg: %.4fus\n", fSize.c_str(), h, l, a );
     GetRunTimes(m_npc, h, l, a);
     GetSize(m_npc.size(), fSize);
     std::printf("           NPC   %s times.   \tHi: %.4fus   \tLo: %.4fus   \tAvg: %.4fus\n", fSize.c_str(), h, l, a );
@@ -379,6 +403,10 @@ std::string Profiler::GetKeyName(uint8& key)
         case Profile::damage:        return "Damage";    //  24,
         case Profile::parseFX:       return "ParseFX";   //  25,
         case Profile::applyFX:       return "ApplyFX";   //  26
+        case Profile::onTarg:        return "OnTarget";  //  27
+        case Profile::destiny_move:  return "DestMoveObj"; // 28
+        case Profile::destiny_orbit: return "DestOrbitTic"; // 29
+        case Profile::destiny_send:  return "DestSendUpd"; // 30
         default:                     return "Invalid Key";
     }
 }

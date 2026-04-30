@@ -51,7 +51,10 @@ namespace Profile {
         damage      = 24,   //*
         parseFX     = 25,   //*
         applyFX     = 26,   //*
-        onTarg      = 27    //
+        onTarg      = 27,   //*
+        destiny_move = 28, //* MoveObject wall-time (high-freq integration)
+        destiny_orbit = 29, //* protected Orbit() tick
+        destiny_send = 30   //* SendDestinyUpdate bubble / pilot queue
     };
 }
 
@@ -104,6 +107,9 @@ private:
     std::vector<double> m_damage;
     std::vector<double> m_effects1;
     std::vector<double> m_effects2;
+    std::vector<double> m_destinyMove;
+    std::vector<double> m_destinyOrbit;
+    std::vector<double> m_destinySend;
 };
 
 #define sProfiler \

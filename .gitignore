@@ -93,8 +93,21 @@ zlib/
 # evemu output
 build/
 build_iwyu/
+buildDiscord/
+build-jury/
 staging/
 out/
+
+# Local env and host-generated DB tool config (container writes evedb.yaml from db_init.sh)
+.env
+/evedb.yaml
+
+# Python bytecode / cache
+**/__pycache__/
+*.pyc
+
+# Local image server cache (bind-mounted; populate on each host as needed)
+/image_cache/
 
 # evemu runtime
 /config/
@@ -130,3 +143,5 @@ client_mod/out/
 client_mod/tools/
 client_mod/compiled.code
 client_mod/**/*.bak
+client_mod/kinda_working.txt
+client_logs_kinda_working.txt
