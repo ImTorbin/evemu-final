@@ -10,7 +10,7 @@
 </p>
 
 ## Introduction
-EVEmu is a work-in-progress server emulator for the space MMO EVE Online. This is an educational project. Please see the disclaimer below for details.
+My updated version of the EVEmu emulator of the Crucible version of EVE Online. There is nothing to purchase with real money and I will never charge for access for anything in-game.
 
 ## ChangeLog
 [ChangeLog](doc/ChangeLog.md)
